@@ -1,0 +1,40 @@
+# --- Secrets / local config -------------------------------------------------
+.env
+.env.*
+!.env.example
+
+# --- .NET build output ----------------------------------------------------------
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Aa]r[Mm]/
+[Aa]r[Mm]64/
+build/
+publish/
+*.user
+*.suo
+*.userprefs
+
+# --- Test / coverage --------------------------------------------------------
+[Tt]est[Rr]esults/
+*.trx
+*.coverage
+*.cobertura.xml
+coverage/
+
+# --- IDE / editor ------------------------------------------------------------
+.vs/
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- OS junk ----------------------------------------------------------------
+.DS_Store
+Thumbs.db
+
+# --- Misc -----------------------------------------------------------------
+*.log
