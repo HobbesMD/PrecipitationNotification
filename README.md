@@ -265,3 +265,46 @@ was untestable, and it's where the ambiguous 1 AM labels came from.
 - every title and tag character ≤ 0x7F;
 - priority mapping;
 - empty hits throws.
+
+#### D9. Probability decides *whether* to alert; amounts decide *how loudly*
+
+**Decision:** `ForecastEvaluator.Evaluate` is the decision engine: a pure
+function of window, forecast, rule and clock, with no I/O and no `DateTime.Now`.
+- **Effective range:** `[max(window start, now), window end)`. A run at 2 AM
+  reports only what's still ahead, and the hits and the totals use the same
+  range, so the message can't mention rain that already fell.
+- **An hour counts if it overlaps the range at all.** The hour containing "now"
+  still counts. Requiring `start >= now` would drop it.
+- **Hit:** probability ≥ threshold (50, inclusive). A missing probability
+  counts as 0.
+- **The alert fires on hits only.** Amounts never gate it, because NWS amounts
+  are coarse (6 h blocks) and often 0 while hourly probability is high.
+  Amounts only pick the kind and priority.
+- **Kind:** Ice if any ice; else Snow if ≥ 0.1"; else Rain. Ice wins because
+  it's the hazard.
+- **Priority high:** snow ≥ 1", any ice, or liquid ≥ 0.5".
+
+**Rejected:**
+- Alerting on amount thresholds. It looks more precise, but it misses nights
+  where NWS has high hourly probability and hasn't filled in amounts.
+- Treating a null probability as "skip". That makes a threshold of 0
+  inconsistent.
+
+**Known fragility:** inch thresholds are compared as doubles. The boundary test
+rows land exactly on 0.1 / 0.5 / 1.0 today; changing the mm→inch path could
+nudge one a hair under.
+
+**Tests:** `ForecastEvaluatorTests`:
+- Real fall-back payload: exactly 12 in-range hours, including both 1 AM hours.
+- Synthetic spring-forward payload: exactly 10 in-range hours, with planted
+  probabilities giving known hits. This payload is hand-built, so it's
+  tracked as debt below.
+- Runs at 01:59:59, 02:00, 02:30 and 06:30 (the hour containing now counts).
+- Hours ending exactly at 20:00 or starting exactly at 07:00 are excluded; hours
+  straddling either edge count.
+- Probability 49/50/51; null probability; hits sorted even from shuffled input.
+- Apportioned totals checked against hand arithmetic, shrinking as "now" moves
+  into the window.
+- Every kind and priority boundary (0.09/0.1 snow, 0.99/1.0 snow, 0.49/0.5
+  liquid, 0.001 ice).
+- A night with amounts but probability 10 stays silent.
