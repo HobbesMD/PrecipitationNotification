@@ -1,12 +1,16 @@
-using System.Text;
+using System.Globalization;
 using Worker;
 using Worker.Forecast;
 using Worker.Nws;
 using Worker.Notifications;
 
-// Block 1 walking skeleton: NWS hourly forecast -> naive overnight threshold
-// -> ntfy notification. Everything hardcoded or read from .env. No tests, no
-// retry, no persistence, no scheduling. See CLAUDE.md for what Block 2 fixes.
+// Block 2 flow: fetch NWS forecast -> resolve the overnight window in the
+// location's own time zone -> evaluate -> compose -> ntfy. Pass --dry-run to
+// print the message instead of sending it. Still missing: persistence and
+// idempotency (Block 4), retry and backoff (Block 5).
+
+var dryRun = args.Contains("--dry-run");
+var inv = CultureInfo.InvariantCulture;
 
 var envFile = DotEnv.Load();
 Console.WriteLine(envFile is null
@@ -30,12 +34,16 @@ nwsHttp.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", config.UserA
 nwsHttp.DefaultRequestHeaders.Accept.ParseAdd("application/geo+json");
 
 var nws = new NwsClient(nwsHttp);
+var now = TimeProvider.System.GetUtcNow();
 
-Console.WriteLine($"Fetching NWS hourly forecast for {config.LatLon} ...");
-IReadOnlyList<ForecastPeriod> periods;
+Console.WriteLine($"Fetching NWS forecast for {config.LatLon} ...");
+NwsForecast forecast;
+TimeZoneInfo zone;
 try
 {
-    periods = await nws.GetHourlyForecastAsync(config.LatLon, CancellationToken.None);
+    forecast = await nws.GetForecastAsync(config.LatLon, CancellationToken.None);
+    // The zone comes from the location (NWS), not from config; an unknown id is a bad NWS response.
+    zone = TimeZoneInfo.FindSystemTimeZoneById(forecast.TimeZoneId);
 }
 catch (Exception ex)
 {
@@ -43,49 +51,52 @@ catch (Exception ex)
     return 2;
 }
 
-Console.WriteLine($"Got {periods.Count} hourly periods.");
+Console.WriteLine($"Got {forecast.Hours.Count} hourly periods.");
 
-var outcome = PrecipDecision.Evaluate(
-    periods,
-    DateTimeOffset.UtcNow,
-    config.TimeZone,
-    config.WindowStart,
-    config.WindowEnd,
-    config.ProbabilityThreshold);
+var window = NightWindow.Resolve(now, zone, config.WindowStart, config.WindowEnd);
+var assessment = ForecastEvaluator.Evaluate(
+    window, forecast.Hours, forecast.Amounts, new AlertRule(config.ProbabilityThreshold), now);
 
+var hoursInWindow = forecast.Hours.Count(h => h.Start < window.EndUtc && h.End > window.StartUtc);
+Console.WriteLine($"Time zone: {zone.Id}");
 Console.WriteLine(
-    $"Overnight window (local): {outcome.WindowStartLocal:ddd MMM d h:mm tt} -> " +
-    $"{outcome.WindowEndLocal:ddd MMM d h:mm tt}");
+    $"Night {window.NightDate:yyyy-MM-dd}: {window.StartUtc:o} -> {window.EndUtc:o} (length {window.Length})");
+Console.WriteLine(
+    $"Hours in window: {hoursInWindow}; hits at/above {config.ProbabilityThreshold}%: {assessment.Hits.Count}");
 
-if (!outcome.ShouldAlert)
+if (!assessment.ShouldAlert)
 {
     Console.WriteLine(
         $"No hour at/above {config.ProbabilityThreshold}% precipitation. No notification sent.");
     return 0;
 }
 
-var kind = outcome.LooksLikeSnow ? "snow" : "rain";
-var title = $"Overnight {kind}: up to {outcome.PeakProbability}% precip";
+Console.WriteLine(
+    $"Peak {assessment.PeakProbability}%, kind {assessment.Kind}, " +
+    $"liquid {assessment.LiquidInches.ToString("0.00", inv)} in, " +
+    $"snow {assessment.SnowInches.ToString("0.00", inv)} in, " +
+    $"ice {assessment.IceInches.ToString("0.00", inv)} in");
 
-var body = new StringBuilder();
-body.AppendLine(
-    $"Tonight {outcome.WindowStartLocal:h:mm tt}-{outcome.WindowEndLocal:h:mm tt}, " +
-    $"{kind} likely (peak {outcome.PeakProbability}%).");
-foreach (var hour in outcome.Hits)
+var msg = NotificationComposer.Compose(assessment, zone);
+
+if (dryRun)
 {
-    body.AppendLine(
-        $"{hour.LocalStart,8:h tt}  {hour.ProbabilityPercent,3}%  " +
-        $"{hour.ShortForecast}  {hour.Temperature} {hour.TemperatureUnit}");
+    Console.WriteLine("----- notification -----");
+    Console.WriteLine($"Title: {msg.Title}");
+    Console.WriteLine($"Priority: {msg.Priority}");
+    Console.WriteLine($"Tags: {msg.Tags}");
+    Console.WriteLine("Body:");
+    Console.WriteLine(msg.Body);
+    Console.WriteLine("------------------------");
+    Console.WriteLine("(dry run: not published)");
+    return 0;
 }
-
-var tags = outcome.LooksLikeSnow ? "snowflake" : "rain_cloud";
-var priority = outcome.PeakProbability >= 80 ? "high" : "default";
 
 using var ntfyHttp = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
 var ntfy = new NtfyPublisher(ntfyHttp, config.NtfyBaseUrl, config.NtfyTopic);
 try
 {
-    await ntfy.PublishAsync(title, body.ToString().TrimEnd(), priority, tags, CancellationToken.None);
+    await ntfy.PublishAsync(msg.Title, msg.Body, msg.Priority, msg.Tags, CancellationToken.None);
 }
 catch (Exception ex)
 {
@@ -94,5 +105,5 @@ catch (Exception ex)
 }
 
 Console.WriteLine(
-    $"Sent notification (peak {outcome.PeakProbability}%, {outcome.Hits.Count} hour(s) over threshold).");
+    $"Sent notification (peak {assessment.PeakProbability}%, {assessment.Hits.Count} hour(s) over threshold).");
 return 0;

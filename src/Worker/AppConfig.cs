@@ -3,8 +3,9 @@ using System.Globalization;
 namespace Worker;
 
 /// <summary>
-/// Block 1 configuration, read straight from environment variables (see
-/// <c>.env.example</c>). No validation beyond "is it present and parseable".
+/// Configuration read straight from environment variables (see
+/// <c>.env.example</c>). Block 2 validates the overnight window; everything else
+/// is only checked for "is it present and parseable".
 /// </summary>
 internal sealed record AppConfig(
     double Lat,
@@ -12,7 +13,6 @@ internal sealed record AppConfig(
     string NtfyBaseUrl,
     string NtfyTopic,
     string UserAgent,
-    TimeZoneInfo TimeZone,
     TimeOnly WindowStart,
     TimeOnly WindowEnd,
     int ProbabilityThreshold)
@@ -29,7 +29,6 @@ internal sealed record AppConfig(
             NtfyBaseUrl: Optional("PRECIP_NTFY_BASE_URL", "https://ntfy.sh"),
             NtfyTopic: Require("PRECIP_NTFY_TOPIC"),
             UserAgent: Require("PRECIP_USER_AGENT"),
-            TimeZone: TimeZoneInfo.FindSystemTimeZoneById(Optional("PRECIP_TIMEZONE", "America/New_York")),
             WindowStart: windowStart,
             WindowEnd: windowEnd,
             ProbabilityThreshold: ParseInt("PRECIP_PROBABILITY_THRESHOLD", 50));

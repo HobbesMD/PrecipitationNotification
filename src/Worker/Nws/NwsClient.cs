@@ -3,11 +3,13 @@ using System.Net.Http.Json;
 namespace Worker.Nws;
 
 /// <summary>
-/// Two-step NWS lookup: <c>/points/{lat},{lon}</c> to discover the gridpoint's
-/// hourly forecast URL, then a GET on that URL for the periods.
+/// NWS lookup: <c>/points/{lat},{lon}</c> to discover the gridpoint's hourly
+/// forecast and raw grid-data URLs (plus the location's time zone), then both
+/// fetched concurrently.
 ///
-/// Block 1 debt: the gridpoint URL is stable and should be cached, but here we
-/// fetch it every run. No retry/backoff either — that's Block 5.
+/// The gridpoint URL is stable and is re-fetched every run for now; caching moves
+/// to Block 4, where it belongs on the Location row (a container has no persistent
+/// disk to cache on). No retry/backoff either — that's Block 5.
 /// </summary>
 internal sealed class NwsClient(HttpClient http)
 {
@@ -37,21 +39,5 @@ internal sealed class NwsClient(HttpClient http)
             ?? throw new InvalidOperationException("NWS gridpoint data returned an empty body.");
 
         return NwsMapper.ToForecast(props, hourly.Properties?.Periods ?? [], grid.Properties);
-    }
-
-    // Block 1 path; removed when Program.cs is rewired
-    public async Task<IReadOnlyList<ForecastPeriod>> GetHourlyForecastAsync(
-        string latLon, CancellationToken ct)
-    {
-        var point = await http.GetFromJsonAsync<PointResponse>(PointsBase + latLon, ct)
-            ?? throw new InvalidOperationException("NWS /points returned an empty body.");
-
-        var hourlyUrl = point.Properties?.ForecastHourly
-            ?? throw new InvalidOperationException("NWS /points response had no forecastHourly URL.");
-
-        var forecast = await http.GetFromJsonAsync<HourlyForecastResponse>(hourlyUrl, ct)
-            ?? throw new InvalidOperationException("NWS hourly forecast returned an empty body.");
-
-        return forecast.Properties?.Periods ?? [];
     }
 }

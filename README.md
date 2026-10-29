@@ -9,32 +9,36 @@ trailer. Design decisions are mine: each one is recorded in the
 [decision log](#decision-log) with the alternative I rejected and the tests
 that prove it.
 
-## Running (Block 1)
+## Running
 
 ```
 cp .env.example .env   # then fill in real values
-dotnet run --project src/Worker
+dotnet run --project src/Worker              # evaluate tonight, notify if needed
+dotnet run --project src/Worker -- --dry-run # print the message, don't send it
+dotnet test
 ```
 
-Reads the NWS hourly forecast for the configured coordinates, checks tonight's
-overnight window against a fixed probability threshold, and publishes one ntfy
-message if anything is over the line.
+Fetches the NWS hourly forecast and raw gridpoint amounts for the configured
+coordinates, works out the next unfinished overnight window (8 PM → 7 AM) in the
+location's own time zone, and publishes one ntfy message if any hour in it is at
+or above the probability threshold. The message says rain, snow or ice, and how
+much.
 
-## Block 1 — deliberate debt
+## Debt ledger
 
-Block 1 is a walking skeleton. The shortcuts below are intentional; each is
-repaid in a later block. This list is the running record — the design-doc
-write-up lands in Block 8.
+Block 1 was a walking skeleton with deliberate shortcuts; each is repaid in a
+later block. Repaid rows stay, struck through, so the history is visible.
 
 | Shortcut | Repaid in |
 |---|---|
-| Overnight window is always *today 20:00 → tomorrow 07:00*, regardless of when the job runs. | Block 2 |
-| On the fall-back night the notification prints two identical "1 AM" lines. *(Originally logged as "double-counts the repeated 01:00–02:00 hour". Captured payloads showed that was wrong: both 1 AM hours are real, distinct hours, and that night's window is genuinely 12 hours long. See [D3](#d3-window-edges-are-utc-instants-dst-handled-at-the-edges-only).)* | Block 2 |
-| `PrecipDecision` is throwaway naive code, not a tested pure function. No captured-payload tests. | Block 2 |
-| NWS gridpoint URL is re-fetched every run instead of cached. | Block 2 |
-| Coordinates, topic, and threshold come from `.env` with no schema or validation. | Block 4 |
+| ~~Overnight window is always *today 20:00 → tomorrow 07:00*, regardless of when the job runs.~~ | ✅ Block 2 ([D2](#d2-which-night-a-run-evaluates)) |
+| ~~On the fall-back night the notification prints two identical "1 AM" lines.~~ *(Originally logged as "double-counts the repeated 01:00–02:00 hour". Captured payloads showed that was wrong: both 1 AM hours are real, distinct hours, and that night's window is genuinely 12 hours long. See [D3](#d3-window-edges-are-utc-instants-dst-handled-at-the-edges-only).)* | ✅ Block 2 ([D8](#d8-the-notification-answers-cushions-or-shovel-and-stays-unambiguous-on-dst-nights)) |
+| ~~`PrecipDecision` is throwaway naive code, not a tested pure function. No captured-payload tests.~~ | ✅ Block 2 ([D9](#d9-probability-decides-whether-to-alert-amounts-decide-how-loudly)) |
+| NWS gridpoint URL is re-fetched every run instead of cached. *(Moved from Block 2: the cache belongs on the Location row, and a container has no persistent disk to cache on.)* | Block 4 |
+| Spring-forward test payload is hand-built (`tests/Fixtures/nws/synthetic-dst-springforward`). *(New in Block 2.)* | Real capture ~2027-03-08 |
+| Coordinates, topic, and threshold come from `.env` with no schema; only the window is validated. | Block 4 |
 | No retry, backoff, circuit breaker, or timeout tuning on the HTTP calls. | Block 5 |
-| Single weather provider, no abstraction seam exercised. | Block 5 |
+| ~~Single weather provider, no abstraction seam.~~ Seam exists ([D7](#d7-nws-responses-map-onto-provider-neutral-types-surprises-fail-loudly)); second provider not yet plugged in. | Block 5 |
 | No persistence and no idempotency — every run that clears the threshold sends a notification. | Block 4 |
 | No tracing or metrics. | Block 6 |
 | Silence is ambiguous: "no precip" and "the job is dead" look identical. No heartbeat. | Block 6 |
@@ -308,3 +312,25 @@ nudge one a hair under.
 - Every kind and priority boundary (0.09/0.1 snow, 0.99/1.0 snow, 0.49/0.5
   liquid, 0.001 ice).
 - A night with amounts but probability 10 stays silent.
+
+#### D10. The window's time zone comes from the location, not from config
+
+**Decision:** the zone is the one NWS reports for the coordinates
+(`/points` → `properties.timeZone`, e.g. `America/New_York`). `PRECIP_TIMEZONE`
+is gone.
+
+**Rejected:** a configured zone. That would mean "8 PM–7 AM on *my* clock,"
+which stops making sense the moment a location in another zone is added, and
+it's one more setting that can disagree with reality.
+
+**Why:** the question is whether precipitation falls at that place overnight,
+so "overnight" is that place's night. In Block 4 the zone becomes a column on
+the Locations table, cached alongside the gridpoint.
+
+**What would break it:** an NWS response without `timeZone` throws (D7), and an
+id the OS doesn't know exits with code 2 rather than guessing. In a container,
+missing `tzdata` would make *every* id unknown (see D1).
+
+**Also in this commit:** `--dry-run` prints the composed message without
+publishing, so the full pipeline can be checked against live data without
+buzzing a phone.
