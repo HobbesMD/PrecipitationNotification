@@ -1,7 +1,8 @@
 # .env holds secrets (ntfy topic, contact info) and must never enter an image layer.
-.env
-.env.*
-!.env.example
+# **/ so a .env anywhere in the tree is excluded, not just at the root.
+**/.env
+**/.env.*
+!**/.env.example
 
 **/bin
 **/obj

@@ -1,25 +1,32 @@
 # Azure deployment (Container Apps Job)
 
 `deploy.sh` creates or updates a nightly Azure Container Apps Job that runs the
-alerter container once and exits (0 on success, 1-5 on failure). It is safe to
-re-run: it checks each resource and creates or updates it.
+alerter container once and exits: 0 on success, non-zero on failure (1–5 from
+the app, or a crash or timeout). It is safe to re-run: it checks each resource,
+then creates or updates it. A failed check that isn't "not found" (expired
+login, unregistered provider) stops the script instead of creating anything.
 
 ## Prerequisites
 
 - Azure CLI, logged in: `az login`
-- The containerapp extension and resource providers (one-time):
+- The containerapp extension and resource providers. This is one-time, and
+  required before the first run; the script checks it and stops if they
+  aren't registered:
 
   ```bash
   az extension add --name containerapp --upgrade
-  az provider register --namespace Microsoft.App
-  az provider register --namespace Microsoft.OperationalInsights
+  az provider register -n Microsoft.App --wait
+  az provider register -n Microsoft.OperationalInsights --wait
   ```
 
-- Docker, and the image already pushed to GHCR, tagged with a git sha:
-  `ghcr.io/hobbesmd/precipitation-notification:<git-sha>`. The script rejects
-  `:latest` and untagged images so every run maps to a commit.
+- The image pushed to GHCR, tagged with a git sha:
+  `ghcr.io/hobbesmd/precipitation-notification:<git-sha>`. The script only
+  accepts a 7–40 character hex tag or an `@sha256:` digest, so every run maps
+  to a commit. `:latest`, `:main` and untagged images are rejected.
+- The GHCR package set to **public** (once, in the package's settings on
+  GitHub; new packages start private even on a public repo).
 
-## Variables to export
+## Variables
 
 Required:
 
@@ -36,38 +43,55 @@ Optional (defaults): `AZ_RG` (`rg-precip`), `AZ_LOCATION` (`eastus`),
 The window is fixed by the script at `PRECIP_WINDOW_START=20:00` and
 `PRECIP_WINDOW_END=07:00`.
 
-### Registry credentials (private image only)
-
-While the repo is private, Azure needs credentials to pull from GHCR. Create a
-GitHub **classic** personal access token with only the `read:packages` scope and
-a 1-year expiry, and set a calendar reminder for renewal. An expired PAT makes
-the job silently stop pulling the image: no run, no alert, no error pushed to
-you. Export it in your own shell; never write it to a file:
-
-```bash
-export GHCR_USER=<github-username>
-export GHCR_PAT=<token>   # type it at the prompt or paste it; do not save it
-```
-
-Set both or neither. If the repo/image becomes public, set neither.
-
-To rotate the PAT, export the new one and re-run `deploy.sh` (it runs
-`az containerapp job registry set` on an existing job).
+**Never type a secret into `export NAME=value` at a prompt:** it lands in
+`~/.bash_history`. The values already live in the gitignored `.env`, so load
+them from there.
 
 ## Running the script
 
+From the repo root, in a subshell, so the values are never typed, never in
+history, and gone afterwards:
+
 ```bash
-export IMAGE=ghcr.io/hobbesmd/precipitation-notification:<git-sha>
-export PRECIP_LAT=... PRECIP_LON=... PRECIP_NTFY_TOPIC=... PRECIP_USER_AGENT=...
-deploy/azure/deploy.sh
+(
+  while IFS='=' read -r k v; do
+    v="${v#\"}"; v="${v%\"}"          # strip one pair of quotes, as the app does
+    export "$k=$v"
+  done < <(grep -E '^PRECIP_[A-Z_]+=' .env | tr -d '\r')
+  IMAGE=ghcr.io/hobbesmd/precipitation-notification:<git-sha> deploy/azure/deploy.sh
+)
 ```
 
-It creates the resource group, a Consumption-plan environment (Log Analytics
-workspace auto-created), and the job on the cron `0 23 * * *`. Container Apps
-cron is UTC only: 23:00 UTC is 7 PM EDT / 6 PM EST, always before the 8 PM local
-window opens.
+This reads `.env` line by line instead of `source`-ing it. The User-Agent
+contains spaces and parentheses, which `source` would try to execute.
 
-To ship a new version, export the new `IMAGE` and re-run.
+It creates the resource group, a Consumption-plan environment (with a Log
+Analytics workspace created automatically), and the job on the cron
+`0 23 * * *`. Container Apps cron is UTC only: 23:00 UTC is 7 PM EDT / 6 PM EST,
+always before the 8 PM local window opens.
+
+To ship a new version, re-run it with the new `IMAGE`.
+
+### Private image (optional)
+
+The image is public, so no registry credentials are needed, and none should be
+set. If it ever goes private, Azure needs a GitHub **classic** PAT with only
+`read:packages` (fine-grained tokens don't cover GHCR). Give it a 1-year expiry
+and a calendar reminder: an expired PAT makes the job silently stop pulling,
+with no run, no alert and no error pushed to you. Read it without echo or
+history:
+
+```bash
+read -rp 'GitHub user: ' GHCR_USER; read -rsp 'PAT: ' GHCR_PAT; echo
+export GHCR_USER GHCR_PAT
+```
+
+Set both or neither. To rotate, read the new one and re-run (`registry set`).
+If both are unset on an existing job that still has `ghcr.io` credentials,
+the script removes them. GHCR rejects a pull with a bad PAT even for a public
+image, so a stale one would break the job when it expires. `registry remove`
+may leave the old password secret on the job; it's harmless, but
+`az containerapp job secret list` shows it.
 
 ## Manual test run
 
@@ -123,7 +147,7 @@ ContainerAppConsoleLogs_CL
 (Column names such as `ContainerJobName_s` may vary too; `ContainerAppConsoleLogs_CL
 | take 5` shows the real schema.)
 
-Execution status `Succeeded` means exit 0; `Failed` means exit 1-5 after the one
+Execution status `Succeeded` means exit 0; `Failed` means a non-zero exit (1–5 from the app, or a crash or timeout) after the one
 retry.
 
 ## Cost

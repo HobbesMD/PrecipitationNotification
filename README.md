@@ -561,19 +561,24 @@ container under each zone:
 | Australia/Sydney | 230 pass | **all pass** |
 
 The test that fails is D2's Sydney row ("08:00 local is still yesterday in
-UTC"). The Sydney leg *can't* catch this bug. It only shows once the host's
-date falls behind the location's date after 7 AM local, and that needs a host
-at least 7 hours west of the location. No inhabited place is 7 hours east of
-Sydney. So the legs aren't redundant: one host zone can be blind to a bug that
-another catches. Production's leg, UTC, is one that catches it.
+UTC"). *(Reasoning corrected by [D23](#d23-review-corrections-to-d17-d19-and-d20).)*
+With a host-zone "today", `Resolve` only goes wrong in one of two cases:
+- the host's date is *behind* the location's after 7 AM local, which needs a
+  host more than 7 hours west of the location;
+- the host's date is *ahead* before 7 AM local, which needs a host more than
+  17 hours east.
+
+The suite's real locations are New York and Sydney, and neither is more than
+7 hours east of a Sydney host or more than 17 hours west of it. So the Sydney
+leg can't catch this bug *with these tests*. A Honolulu row would let it. The
+legs aren't redundant: one host zone can be blind to a bug that another
+catches. Production's leg, UTC, is one that catches it.
 
 **Limitation:** the matrix multiplies the existing tests; it doesn't add
-cases. A host-zone bug in code with no far-east test rows would still get
-through.
+cases. Which bugs a leg can see depends on which zones the rows use.
 
-**Not enforced yet:** the repo is private on GitHub Free, so the check shows
-pass/fail on each PR but can't be made required. A public repo can require
-`test` and `image` before merge.
+**Enforcement:** the repo is now public, so `main` can require `test` and
+`image` to pass before a merge.
 
 #### D18. Runtime image: chiseled `-extra`, proved by `--self-check`
 
@@ -634,10 +639,16 @@ older than it could be.
   but every extra run is another chance at a duplicate alert, and duplicates
   aren't prevented until Block 4's idempotency key.
 
-**What would break it:** a location where 23:00 UTC is already 8 PM or later,
-which is anywhere at UTC−3 or further east (London gets it at 11 PM or
-midnight). The evaluator still does the right thing there, because D9 only
-looks at hours still ahead, but the alert arrives after the night has started.
+**What would break it** *(corrected by [D23](#d23-review-corrections-to-d17-d19-and-d20))*:
+a location where 23:00 UTC isn't early evening.
+- **UTC−3 through UTC+7:** 23:00 UTC falls inside the window (London gets it
+  at 11 PM or midnight). The evaluator still does the right thing, because D9
+  only looks at hours still ahead, but the alert arrives after the night has
+  started.
+- **UTC+8 and further east:** 23:00 UTC is already the next morning (9 AM in
+  Guam, which NWS serves). `Resolve` picks the coming night, so the alert
+  arrives about 11 hours early, on a forecast that old.
+
 Per-location schedules belong with Block 4's Locations table.
 
 **Tests:** `NightWindowTests.Utc_cron_run_precedes_that_evenings_window_in_New_York`
@@ -650,9 +661,10 @@ forward. Each row asserts:
 
 #### D20. One retry, and the duplicate it can cause
 
-**Decision:** one replica, a 300 s timeout, and `replicaRetryLimit = 1`. A
-non-zero exit (1–5) makes Azure retry once. If the retry also fails, the
-execution is marked Failed.
+**Decision:** one replica, a 300 s timeout, and `replicaRetryLimit = 1`. Any
+non-zero exit makes Azure retry once. That means 1–5 from the app, but also a
+crash (an unhandled exception exits 134) or the timeout killing the replica.
+If the retry also fails, the execution is marked Failed.
 
 **Rejected:**
 - **No retries:** one NWS hiccup loses the night's alert, and there's no
@@ -662,7 +674,10 @@ execution is marked Failed.
 **The duplicate it can cause:** if ntfy accepts the message but the response
 is lost (a timeout or a reset connection), the app exits 3, Azure runs it
 again, and the phone gets the alert twice. Every other failure (config, NWS,
-incomplete forecast) happens before anything is sent, so retrying it is safe.
+incomplete forecast, a crash) happens before anything is sent, so retrying it
+is safe. After a successful publish, the only code left is one `WriteLine`
+and `return 0`. The 300 s timeout can't cut a publish short either: three
+30 s HTTP timeouts cap the run's network time at about 90 s.
 This is accepted for now and logged as debt. Block 4's database-enforced
 `(locationId, forecastNightDate)` key turns the retry into a no-op.
 
@@ -749,3 +764,54 @@ URL. Block 6's structured logging must keep coordinates out of its fields.
   absent from the message;
 - missing and empty values are rejected, naming the variable.
 
+#### D23. Review: corrections to D17, D19 and D20
+
+**Corrections:**
+- **D17** said a host-zone "today" bug needs a host 7 hours west of the
+  location. That was half the story: a host more than 17 hours *east* also
+  triggers it. So the Sydney leg's blindness comes from the suite having no
+  far-west location (like Honolulu), not from Sydney itself.
+- **D19** said 23:00 UTC is late everywhere at UTC−3 and further east. From
+  UTC+8 east it's actually the next *morning*, so the alert comes about 11
+  hours early.
+- **D20** said "exit 1–5". Any non-zero exit retries, including a crash
+  (exit 134) and the replica timeout. All of them happen before the send, so
+  the duplicate argument stands.
+
+The entries above are corrected in place, each marked.
+
+#### D24. Review: `deploy.sh` fails closed
+
+**Findings and fixes:**
+- **"Doesn't exist" vs "broken."** `az ... show` failing for *any* reason
+  (an expired login, throttling, an unregistered provider) sent the script
+  down the create path and hid the real error. It now creates only when az
+  says not-found, and otherwise stops with az's message. It also checks up
+  front that the `Microsoft.App` and `Microsoft.OperationalInsights`
+  providers are registered. This subscription's weren't, which is how the
+  reviewer found the problem.
+- **Tags.** It rejected only `:latest`, so `:main` passed, and a mutable tag
+  breaks "every run maps to a commit." It now accepts only a 7–40 character
+  hex tag or an `@sha256:` digest.
+- **Stale credentials.** On an existing job with no PAT set, it now removes
+  any old `ghcr.io` registry entry. GHCR rejects a pull with a bad PAT even
+  for a public image, so a stale one would break the job when it expired.
+- **Small fixes:**
+  - the script is now executable (`100755`);
+  - `.dockerignore` excludes `.env` at any depth (`**/.env`), not just at the
+    root.
+
+**Proof:** stub runs with a fake `az` on `PATH`:
+- `:main`, `:latest` and an untagged registry-port image are rejected; a sha
+  tag and a digest pass.
+- An unregistered provider stops the script with the fix command.
+- Not-found takes the create path; a "not registered" show error stops the
+  script without creating anything.
+- A public image with an old `ghcr.io` entry triggers `registry remove`.
+
+A probe build with `.env` files at the root and in `src/Worker/` copied only
+the `.env.example` files.
+
+**Not changed:** actions are pinned to major version tags rather than commit
+SHAs. The workflow uses no secrets and a read-only token, so a compromised
+action has little to steal. Revisit in Block 7, when CI gets push credentials.
