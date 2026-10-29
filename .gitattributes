@@ -1,0 +1,4 @@
+# Shell scripts and the Dockerfile run on Linux (or Git Bash); CRLF breaks them.
+# core.autocrlf on a Windows checkout would otherwise convert them.
+*.sh        text eol=lf
+Dockerfile  text eol=lf

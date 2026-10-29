@@ -11,7 +11,12 @@ using Worker.Notifications;
 //
 // Exit codes: 0 ok (alerted or genuinely dry), 1 config, 2 NWS fetch,
 // 3 ntfy publish, 4 incomplete forecast (gaps in the hourly data and no hits
-// in the hours we do have; with hits, the alert goes out flagged as partial).
+// in the hours we do have; with hits, the alert goes out flagged as partial),
+// 5 runtime self-check failed (--self-check only).
+
+// Before .env and config on purpose: the check needs neither, so CI can run it
+// against the built image with nothing set.
+if (args.Contains("--self-check")) return RuntimeSelfCheck.Run(Console.Out);
 
 var dryRun = args.Contains("--dry-run");
 var inv = CultureInfo.InvariantCulture;

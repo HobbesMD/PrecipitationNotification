@@ -16,7 +16,14 @@ cp .env.example .env   # then fill in real values
 dotnet run --project src/Worker              # evaluate tonight, notify if needed
 dotnet run --project src/Worker -- --dry-run # print the message, don't send it
 dotnet test
+
+docker build -t precip .
+docker run --rm precip --self-check                # image has real time-zone data? (exit 0/5)
+docker run --rm --env-file .env precip --dry-run   # full pipeline in a UTC container
 ```
+
+Deployed as an Azure Container Apps Job on a nightly cron: see
+[deploy/azure/README.md](deploy/azure/README.md).
 
 Fetches the NWS hourly forecast and raw gridpoint amounts for the configured
 coordinates, works out the next unfinished overnight window (8 PM → 7 AM) in the
@@ -567,4 +574,46 @@ through.
 **Not enforced yet:** the repo is private on GitHub Free, so the check shows
 pass/fail on each PR but can't be made required. A public repo can require
 `test` and `image` before merge.
+
+#### D18. Runtime image: chiseled `-extra`, proved by `--self-check`
+
+**Decision:** a multi-stage `Dockerfile`. The .NET 10 SDK image publishes
+`src/Worker`, and the runtime image is
+`mcr.microsoft.com/dotnet/runtime:10.0-noble-chiseled-extra`.
+- **Chiseled** means distroless: no shell, no package manager, and it runs as
+  the non-root user `app` (UID 1654).
+- **`-extra`** adds tzdata and ICU.
+
+A new flag, `--self-check`, looks up `America/New_York` and checks that its
+offset is −4 h on 2026-07-01 and −5 h on 2026-01-15. It needs no network and
+no config, and it exits 0, or **5** on failure. CI runs it against every image
+it builds.
+
+**Rejected:**
+- **Plain chiseled.** It has no tzdata, so `FindSystemTimeZoneById` throws and
+  every night exits 2. That's the trap D1 warned about.
+- **The full `runtime:10.0` image.** It works, but it's bigger and ships a
+  shell and package manager that a nightly job never uses.
+- **A live `--dry-run` in CI.** That proves more, but it calls NWS, so an NWS
+  outage would fail PRs for reasons unrelated to the change.
+
+**Why check offsets, not just the lookup:** a lookup can succeed against a
+zone with no rules, which would report a fixed offset all year. Checking a
+summer *and* a winter offset proves the DST rules are actually there.
+
+**Mutation check:** on plain `-noble-chiseled` the self-check prints
+`FAIL America/New_York: The time zone ID 'America/New_York' was not found on
+the local computer.` and exits 5. Back on `-extra`, it exits 0.
+
+**Also:**
+- `.dockerignore` keeps `.env` (secrets), `.git`, tests and tools out of the
+  build context. The exported image filesystem contains no `.env`, and `/app`
+  holds only the four published files.
+- `.gitattributes` forces LF on `*.sh` and the `Dockerfile`. A Windows
+  checkout with `core.autocrlf` was turning `tools/capture-nws.sh` into CRLF,
+  which bash can't run.
+
+**Tests:**
+- `RuntimeSelfCheckTests` proves the check passes on the dev host.
+- CI's `image` job proves it passes in the real runtime image.
 

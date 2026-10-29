@@ -1,0 +1,17 @@
+# .env holds secrets (ntfy topic, contact info) and must never enter an image layer.
+.env
+.env.*
+!.env.example
+
+**/bin
+**/obj
+.git
+.github
+.claude
+.vs
+.vscode
+.idea
+tests
+tools
+deploy
+*.md
