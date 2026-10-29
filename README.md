@@ -229,3 +229,39 @@ HTTP:
 - a non-mm unit throws.
 
 The HTTP path itself is untested until WireMock arrives in Block 5.
+
+#### D8. The notification answers "cushions or shovel" and stays unambiguous on DST nights
+
+**Decision:** `NotificationComposer` is a pure function from `NightAssessment`
+to title, body, tags and priority.
+- **Title leads with the kind** and shows the amount for that kind:
+  `Overnight snow: 2.1" expected, up to 80%`. A snow night reports snow inches,
+  not liquid. NWS's liquid figure *includes* melted snow, so leading with it
+  would undersell a snowstorm by ~10×.
+- **Repeated hours get a suffix.** On the fall-back night the two 1 AM hours
+  print as `1 AM EDT` and `1 AM EST`; unambiguous hours get no suffix. This
+  fixes the Block 1 "two identical 1 AM lines" debt.
+- **The abbreviation table is keyed by the zone's standard offset, not the
+  hour's offset.** −5 h is both EST and CDT, so "offset → name" alone would
+  label Chicago summer time as Eastern. Zones outside the table fall back to
+  `UTC+1`-style labels.
+- **"trace" and "0.0" can't disagree.** Amounts under 0.05" print as `trace`
+  in the body, and the same constant drops the amount clause from the title.
+  The title can never say "0.0" while the body says "trace."
+- **Title and tags are ASCII.** ntfy reads HTTP headers as Latin-1, so non-ASCII
+  characters would arrive garbled. The body is UTF-8 and may use `·`.
+- **Composing with no hits throws.** Callers must check `ShouldAlert`, so
+  inventing a "nothing to report" message would hide that bug.
+
+**Rejected:** formatting inside `Program.cs`, which is what Block 1 did. It
+was untestable, and it's where the ambiguous 1 AM labels came from.
+
+**Tests:** `NotificationComposerTests` covers:
+- titles for rain, snow and ice;
+- dropping the amount clause at 0, and the trace boundary (0.01, 0.049);
+- leaving zero series out of the amounts line;
+- the fall-back night body (EDT/EST suffixes, none on 3 AM) and its window line;
+- a `UTC+1` fallback label for London;
+- every title and tag character ≤ 0x7F;
+- priority mapping;
+- empty hits throws.
