@@ -617,3 +617,34 @@ the local computer.` and exits 5. Back on `-extra`, it exits 0.
 - `RuntimeSelfCheckTests` proves the check passes on the dev host.
 - CI's `image` job proves it passes in the real runtime image.
 
+#### D19. The nightly run is 23:00 UTC
+
+**Decision:** cron `0 23 * * *`. Container Apps cron schedules are always UTC,
+with no time-zone setting, so the local run time moves with DST: 7 PM EDT in
+summer, 6 PM EST in winter. Both are before the 8 PM window opens. The alert
+always arrives before the night starts, on a forecast at most an hour or two
+older than it could be.
+
+**Rejected:**
+- **One cron per DST season**, e.g. 00:00 UTC in summer and 01:00 UTC in
+  winter to land on exactly 8 PM. That means editing the schedule twice a
+  year, or having the app skip whichever run is in the wrong season. Both are
+  brittle.
+- **Running hourly and letting the app decide it's evening.** That's correct,
+  but every extra run is another chance at a duplicate alert, and duplicates
+  aren't prevented until Block 4's idempotency key.
+
+**What would break it:** a location where 23:00 UTC is already 8 PM or later,
+which is anywhere at UTC−3 or further east (London gets it at 11 PM or
+midnight). The evaluator still does the right thing there, because D9 only
+looks at hours still ahead, but the alert arrives after the night has started.
+Per-location schedules belong with Block 4's Locations table.
+
+**Tests:** `NightWindowTests.Utc_cron_run_precedes_that_evenings_window_in_New_York`
+runs at 23:00Z on six days: an ordinary summer day, an ordinary winter day, the
+day before and the day of fall-back, and the day before and the day of spring
+forward. Each row asserts:
+- the night date is that same local date;
+- the exact window instants;
+- the run happens before the window starts.
+

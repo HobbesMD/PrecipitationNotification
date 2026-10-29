@@ -64,6 +64,23 @@ public class NightWindowTests
     public void Dst_transition_on_window_edge(string zone, string now, string night, string startUtc, string endUtc, int hours) =>
         AssertWindow(zone, now, night, startUtc, endUtc, hours);
 
+    // The deployed cron fires at a fixed 23:00 UTC (Container Apps cron has no time zone),
+    // so its local time drifts with DST: 19:00 EDT, 18:00 EST. These rows prove the 23:00Z run
+    // evaluates that evening's own night and fires before the window opens, in both seasons
+    // and on both transition days.
+    [Theory]
+    [InlineData("2026-07-15T23:00:00Z", "2026-07-15", "2026-07-16T00:00:00Z", "2026-07-16T11:00:00Z", 11)] // ordinary summer: 19:00 EDT
+    [InlineData("2027-01-15T23:00:00Z", "2027-01-15", "2027-01-16T01:00:00Z", "2027-01-16T12:00:00Z", 11)] // ordinary winter: 18:00 EST
+    [InlineData("2026-10-31T23:00:00Z", "2026-10-31", "2026-11-01T00:00:00Z", "2026-11-01T12:00:00Z", 12)] // fall-back eve: 19:00 EDT
+    [InlineData("2026-11-01T23:00:00Z", "2026-11-01", "2026-11-02T01:00:00Z", "2026-11-02T12:00:00Z", 11)] // first evening after fall-back: 18:00 EST
+    [InlineData("2027-03-13T23:00:00Z", "2027-03-13", "2027-03-14T01:00:00Z", "2027-03-14T11:00:00Z", 10)] // spring-forward eve: 18:00 EST
+    [InlineData("2027-03-14T23:00:00Z", "2027-03-14", "2027-03-15T00:00:00Z", "2027-03-15T11:00:00Z", 11)] // first evening after spring-forward: 19:00 EDT
+    public void Utc_cron_run_precedes_that_evenings_window_in_New_York(string now, string night, string startUtc, string endUtc, int hours)
+    {
+        AssertWindow("America/New_York", now, night, startUtc, endUtc, hours);
+        Assert.True(Instant(now) < Instant(startUtc), "the alert must fire before the window opens");
+    }
+
     private const string GapAtStart = "Test/GapAtStart";
     private const string GapAtEnd = "Test/GapAtEnd";
     private const string AmbiguousAtStart = "Test/AmbiguousAtStart";
