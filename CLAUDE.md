@@ -88,7 +88,7 @@ side projects die.
 | 7 | CI/CD | Actions: build → test → container → push → deploy. |
 | 8 | README as design doc | What I built, what I traded away, why. Diagrams. |
 
-**Current block: 2.** (Block 1 done 2026-10-29 — notification confirmed on phone.)
+**Current block: 3.** (Block 1 done 2026-10-29 — notification confirmed on phone. Block 2 done 2026-10-29 — PR #1.)
 
 Block 1 leaves debt *on purpose* — hardcoded coordinates, naive time handling,
 topic in source, no tests, no retry. Block 2 fixes it. Don't fix it early; the
