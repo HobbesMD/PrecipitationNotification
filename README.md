@@ -521,3 +521,50 @@ verdict (D13).
 - a complete forecast has no gaps;
 - the message line appears in local time when there are gaps, and is absent
   without them.
+
+### Block 3: containerize + deploy
+
+#### D17. CI runs the tests under three host time zones
+
+**Decision:** every PR to `main`, and every push to it, runs build and test in
+GitHub Actions (`.github/workflows/ci.yml`). The `test` job runs three times,
+with the runner's `TZ` set to `UTC`, `America/New_York` and
+`Australia/Sydney`. A separate `image` job builds the container and runs
+`--self-check` (D18). Nothing is pushed anywhere.
+
+**Rejected:** a single test run. It passes in whatever zone the runner happens
+to be in, but the rule since D1 is that the *host's* zone must never matter.
+Production is a UTC container and the dev box is in New York, so a bug that
+reads the host zone can pass on one and fail on the other.
+
+**Why these three:**
+- **UTC** is production.
+- **New York** is the dev box. It's where a host-zone bug is easiest to miss,
+  because there the host zone and the location's zone agree.
+- **Sydney** is the far side: a positive offset with opposite-season DST.
+
+**What the mutation check showed:** I made "today" come from the host's zone
+(`now.LocalDateTime`) instead of the location's, then ran the suite in a Linux
+container under each zone:
+
+| Host `TZ` | Clean | Mutated |
+|---|---|---|
+| UTC | 230 pass | 1 fails |
+| America/New_York | 230 pass | 1 fails |
+| Australia/Sydney | 230 pass | **all pass** |
+
+The test that fails is D2's Sydney row ("08:00 local is still yesterday in
+UTC"). The Sydney leg *can't* catch this bug. It only shows once the host's
+date falls behind the location's date after 7 AM local, and that needs a host
+at least 7 hours west of the location. No inhabited place is 7 hours east of
+Sydney. So the legs aren't redundant: one host zone can be blind to a bug that
+another catches. Production's leg, UTC, is one that catches it.
+
+**Limitation:** the matrix multiplies the existing tests; it doesn't add
+cases. A host-zone bug in code with no far-east test rows would still get
+through.
+
+**Not enforced yet:** the repo is private on GitHub Free, so the check shows
+pass/fail on each PR but can't be made required. A public repo can require
+`test` and `image` before merge.
+

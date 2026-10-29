@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Superseded PR runs are cancelled; pushes to main always run to completion.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The decision engine must not depend on the host's time zone.
+        # Production runs in a UTC container, the dev box is New York, and
+        # Sydney is a positive-offset southern-hemisphere zone (opposite DST).
+        tz: [UTC, America/New_York, Australia/Sydney]
+    env:
+      TZ: ${{ matrix.tz }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show host time zone
+        run: |
+          date
+          cat /etc/timezone 2>/dev/null || true
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      # setup-dotnet's built-in cache needs packages.lock.json, which this
+      # repo does not use, so cache the global packages folder directly.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      - run: dotnet restore
+
+      - run: dotnet build -c Release --no-restore
+
+      # global.json selects the Microsoft.Testing.Platform runner, so these are
+      # MTP options (not VSTest's --logger trx flags).
+      - run: dotnet test -c Release --no-build --results-directory TestResults --report-xunit-trx
+
+      - name: Upload test results
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ strategy.job-index }}
+          path: TestResults/
+          if-no-files-found: warn
+
+  image:
+    name: image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The runtime image must contain tz data or every run throws when it
+      # resolves America/New_York. --self-check proves that without network
+      # or config. Nothing is pushed anywhere.
+      - run: docker build -t precip:ci .
+
+      - run: docker run --rm precip:ci --self-check
