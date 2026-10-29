@@ -158,3 +158,42 @@ at startup, with a message naming the settings, not be re-discovered every
 night by the decision engine.
 
 **Tests:** `AppConfigTests`.
+
+#### D6. Amounts are split across the window pro-rata
+
+**Context:** NWS gridpoint data gives accumulations (mm) over UTC intervals,
+usually 6 hours: `2026-11-01T00:00:00+00:00/PT6H` is 8 PM–2 AM EDT. Intervals
+straddle the window edges, so some fraction of each has to be counted.
+
+**Decision:** each interval contributes `mm × overlap / duration`, which
+assumes precipitation falls at an even rate across the interval. Overlap is
+computed on instants, as `min(end, windowEnd) − max(start, windowStart)`, so
+DST can't distort it. The window is half-open: an interval ending exactly at
+8 PM counts zero.
+
+**Rejected:** weighting each interval by the hourly probability of
+precipitation. Probability is a *chance*, not an *intensity*, so using it as a
+weight would invent a distribution the data doesn't contain.
+
+**Known limitation:** if 6 mm falls in the last hour of a 6-hour interval that
+straddles 7 AM, the even-rate assumption misattributes it. That's acceptable
+for "cushions or shovel" precision.
+
+**Missing values:** a null amount counts as 0, so a gap in NWS data reads as
+"no precipitation." This can undercount. It's the conservative choice for
+totals, because the *alert trigger* is the hourly probability, not the amount
+(see D9).
+
+**Parsing:** `validTime` is split on `/`. The start is parsed with
+`DateTimeOffset` and the ISO-8601 duration with `XmlConvert.ToTimeSpan`, which
+handles `PT6H` and `P1DT6H` without a hand-written regex. Malformed, zero and
+negative durations throw `FormatException`.
+
+**Tests:** `PrecipAmountsTests` covers:
+- intervals fully inside, fully outside, straddling either edge, and containing
+  the whole window;
+- zero-length and inverted windows;
+- offsets other than UTC;
+- the real fixture over the fall-back night. Every value in it is 0 mm, so a
+  second case with every value set to 6 mm checks that the arithmetic yields
+  12 mm.
