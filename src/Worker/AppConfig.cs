@@ -24,8 +24,8 @@ internal sealed record AppConfig(
         ValidateWindow(windowStart, windowEnd);
 
         return new(
-            Lat: ParseDouble("PRECIP_LAT"),
-            Lon: ParseDouble("PRECIP_LON"),
+            Lat: ParseCoordinate("PRECIP_LAT", Environment.GetEnvironmentVariable("PRECIP_LAT")),
+            Lon: ParseCoordinate("PRECIP_LON", Environment.GetEnvironmentVariable("PRECIP_LON")),
             NtfyBaseUrl: Optional("PRECIP_NTFY_BASE_URL", "https://ntfy.sh"),
             NtfyTopic: Require("PRECIP_NTFY_TOPIC"),
             UserAgent: Require("PRECIP_USER_AGENT"),
@@ -77,8 +77,22 @@ internal sealed record AppConfig(
     private static string Optional(string key, string fallback) =>
         Environment.GetEnvironmentVariable(key) is { Length: > 0 } v ? v : fallback;
 
-    private static double ParseDouble(string key) =>
-        double.Parse(Require(key), CultureInfo.InvariantCulture);
+    /// <summary>
+    /// Coordinates are secrets (they pin a home), so unlike the threshold the error
+    /// names the variable but never echoes the value: <c>double.Parse</c>'s own
+    /// message would, and config errors go to the logs.
+    /// </summary>
+    internal static double ParseCoordinate(string key, string? raw)
+    {
+        if (string.IsNullOrEmpty(raw))
+            throw new InvalidOperationException($"Missing required environment variable {key}.");
+
+        if (!double.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out var value))
+            throw new InvalidOperationException(
+                $"{key} must be decimal degrees, e.g. 40.7128 (value not shown: coordinates are secret).");
+
+        return value;
+    }
 
     private static TimeOnly ParseTime(string key, string fallback) =>
         TimeOnly.Parse(Optional(key, fallback), CultureInfo.InvariantCulture);

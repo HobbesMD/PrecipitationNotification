@@ -23,18 +23,42 @@ AZ_JOB="${AZ_JOB:-job-precip-nightly}"
 : "${PRECIP_NTFY_TOPIC:?set PRECIP_NTFY_TOPIC}"
 : "${PRECIP_USER_AGENT:?set PRECIP_USER_AGENT (NWS rejects requests without contact info)}"
 
-# The job must pin an immutable tag so every run is traceable to a commit.
+# The job must pin a commit so every run is traceable to one: a git sha tag
+# (7-40 hex) or a digest. Branch-like tags (:main, :latest) are mutable on GHCR.
 # Take the last path segment, so a registry port (host:5000/img) isn't read as a tag.
 last_segment="${IMAGE##*/}"
-if [[ "$IMAGE" == *@sha256:* ]]; then
+if [[ "$IMAGE" =~ @sha256:[0-9a-f]{64}$ ]]; then
   :  # digest reference: immutable by construction
-elif [[ "$last_segment" != *:* ]]; then
-  echo "IMAGE has no tag; pin a git sha tag (an untagged image means :latest)." >&2
-  exit 1
-elif [[ "${last_segment##*:}" == "latest" ]]; then
-  echo "IMAGE uses :latest; pin a git sha tag so a run maps to a commit." >&2
+elif [[ "$last_segment" == *:* && "${last_segment##*:}" =~ ^[0-9a-f]{7,40}$ ]]; then
+  :  # git sha tag
+else
+  echo "IMAGE must end in a git sha tag (:<7-40 hex>) or @sha256:<digest>, so a run maps to a commit." >&2
   exit 1
 fi
+
+# `show` exits non-zero for "doesn't exist" AND for real errors (unregistered
+# provider, expired login, throttling). Only the first may fall through to
+# create; anything else aborts with az's own message.
+exists() {
+  local err
+  if err=$("$@" -o none 2>&1); then
+    return 0
+  elif grep -qiE 'ResourceNotFound|ResourceGroupNotFound|could not be found|was not found' <<<"$err"; then
+    return 1
+  else
+    echo "$err" >&2
+    exit 1
+  fi
+}
+
+# Without these the show calls fail as above; say what to run instead.
+for ns in Microsoft.App Microsoft.OperationalInsights; do
+  state=$(az provider show -n "$ns" --query registrationState -o tsv)
+  if [[ "$state" != "Registered" ]]; then
+    echo "Resource provider $ns is '$state'. One-time fix: az provider register -n $ns --wait" >&2
+    exit 1
+  fi
+done
 
 # Registry credentials: both or neither (neither = public image).
 use_registry=0
@@ -80,7 +104,7 @@ sizing=(
 echo "Resource group: $AZ_RG ($AZ_LOCATION)"
 az group create -n "$AZ_RG" -l "$AZ_LOCATION" -o none
 
-if az containerapp env show -n "$AZ_ENV" -g "$AZ_RG" -o none 2>/dev/null; then
+if exists az containerapp env show -n "$AZ_ENV" -g "$AZ_RG"; then
   echo "Environment $AZ_ENV exists."
 else
   echo "Creating environment $AZ_ENV (Consumption, auto-created Log Analytics)..."
@@ -88,7 +112,7 @@ else
     --enable-workload-profiles false -o none
 fi
 
-if az containerapp job show -n "$AZ_JOB" -g "$AZ_RG" -o none 2>/dev/null; then
+if exists az containerapp job show -n "$AZ_JOB" -g "$AZ_RG"; then
   echo "Updating job $AZ_JOB..."
   # `job update` has no --secrets or registry flags, so those go through their
   # own commands first (secrets must exist before an env var can secretref them).
@@ -96,6 +120,11 @@ if az containerapp job show -n "$AZ_JOB" -g "$AZ_RG" -o none 2>/dev/null; then
   if [[ $use_registry -eq 1 ]]; then
     az containerapp job registry set -n "$AZ_JOB" -g "$AZ_RG" \
       --server ghcr.io --username "$GHCR_USER" --password "$GHCR_PAT" -o none
+  elif [[ -n "$(az containerapp job registry list -n "$AZ_JOB" -g "$AZ_RG" --query "[?server=='ghcr.io'].server" -o tsv)" ]]; then
+    # Public image now: drop the old credential. GHCR rejects a pull with a bad
+    # PAT even for a public image, so a stale one would break the job when it expires.
+    echo "Removing ghcr.io registry credentials (public image)..."
+    az containerapp job registry remove -n "$AZ_JOB" -g "$AZ_RG" --server ghcr.io -o none
   fi
   # --replace-env-vars drops any stale variables not listed here.
   az containerapp job update -n "$AZ_JOB" -g "$AZ_RG" \

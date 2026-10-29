@@ -674,17 +674,23 @@ distinguishable from "no rain."
 The job definition after deploy (`az containerapp job show`) shows the
 settings.
 
-#### D21. Secrets live in the job, not in the image or the repo
+#### D21. Secrets live in the job, not in the image, the repo or the logs
+
+*(Revised by [D22](#d22-review-the-coordinates-were-in-the-logs-every-night): the logs part, and the public repo.)*
 
 **Decision:**
 - The ntfy topic and the coordinates are Container Apps **job secrets**,
   injected as env vars with `secretref:`. The coordinates count as secrets
-  because a forecast gridpoint pins a home to about 2.5 km.
+  because four decimal places pin a house to about 11 m.
 - The NWS User-Agent and the window are plain env vars.
-- The repo is private, so pulling the image from GHCR needs a classic PAT
-  with only `read:packages`. The CLI stores it as a job secret too.
+- The repo and its GHCR image are **public**, so Azure pulls the image with
+  no registry credentials. Going public was the plan from the start; it also
+  removes a GitHub PAT that would have expired after a year and silently
+  stopped the job.
 - `deploy/azure/deploy.sh` reads every value from the environment, never
-  echoes one, and never uses `set -x`.
+  echoes one, and never uses `set -x`. Its README loads the values from the
+  gitignored `.env` in a subshell, rather than having you type
+  `export NAME=value` into shell history.
 
 **Rejected:**
 - **Key Vault with a managed identity.** That's the right answer for many
@@ -692,14 +698,54 @@ settings.
   role assignments, and protects nothing more in this block.
 - **Plain env vars.** Anyone with Reader on the job could read them in its
   definition.
-
-**Known risk:** the PAT expires after a year. Then Azure can't pull the image
-and the job stops running, with no alert to say so. Mitigations:
-- a calendar reminder to renew it;
-- Block 6's heartbeat, which notices a run that never happened;
-- making the repo and image public, which removes the PAT entirely.
+- **A private image and a PAT.** It hides nothing (the code is public anyway)
+  and adds an expiring credential.
 
 **Proof:**
 - `.dockerignore` keeps `.env` out of the image (D18).
 - After deploy, `az containerapp job show` lists the secret names, not their
   values.
+- The app never prints the coordinates (D22).
+
+### Block 3: independent review
+
+After D17–D21, a separate reviewer that wrote none of the code checked the
+branch. It confirmed the D19 instants, that .NET on Linux honors `TZ`, that a
+failing test fails the CI job under the MTP runner, the D20 duplicate argument,
+and that re-running `deploy.sh` keeps existing secrets. It found two real
+problems and several smaller ones.
+
+#### D22. Review: the coordinates were in the logs every night
+
+**Finding:** D21 made the coordinates a job secret, but the app printed them
+on every run (`Fetching NWS forecast for <lat>,<lon>`). In Azure, stdout
+goes to the Log Analytics workspace. So the exact location was copied there
+nightly, readable by anyone who can query the workspace. A malformed coordinate
+leaked too, because `double.Parse`'s error message includes the input, and
+config errors are printed. The secret only protected the job definition.
+
+**Decision:**
+- The coordinates are never written to stdout or stderr. The fetch log line no
+  longer includes them.
+- `AppConfig.ParseCoordinate` names the variable in its error but never the
+  value, unlike the threshold error (D14), which echoes the value because it
+  isn't secret.
+- It also stopped accepting thousands separators. `12,3456` (a European
+  decimal comma) used to parse silently as `123456`.
+
+Nothing else leaks: `HttpRequestException` messages don't include the
+`/points/{lat},{lon}` URL, and the gridpoint failure reasons don't either.
+
+**Rejected:** rounding the coordinates in the log. Any precision useful for
+debugging is precise enough to locate a house, and the time zone that's
+already logged covers what debugging needs.
+
+**What would break it:** any new log line that prints `config` or the points
+URL. Block 6's structured logging must keep coordinates out of its fields.
+
+**Tests:** `AppConfigTests`:
+- a valid coordinate parses exactly;
+- `12.3456x` and `12,3456` are rejected with the variable named and `3456`
+  absent from the message;
+- missing and empty values are rejected, naming the variable.
+

@@ -43,4 +43,30 @@ public class AppConfigTests
         Assert.Contains("PRECIP_PROBABILITY_THRESHOLD", ex.Message);
         Assert.Contains(raw, ex.Message);
     }
+
+    [Theory]
+    [InlineData("40.7128", 40.7128)]
+    [InlineData("-74.006", -74.006)]
+    public void Coordinate_parses_invariant_decimal_degrees(string raw, double expected) =>
+        Assert.Equal(expected, AppConfig.ParseCoordinate("PRECIP_LAT", raw));
+
+    [Theory]
+    [InlineData("12.3456x")]
+    [InlineData("12,3456")]
+    public void Coordinate_invalid_is_rejected_without_echoing_the_value(string raw)
+    {
+        // Config errors are logged, and coordinates pin a home: name the variable, never the value.
+        var ex = Assert.Throws<InvalidOperationException>(() => AppConfig.ParseCoordinate("PRECIP_LAT", raw));
+        Assert.Contains("PRECIP_LAT", ex.Message);
+        Assert.DoesNotContain("3456", ex.Message);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    public void Coordinate_missing_is_rejected_naming_variable(string? raw)
+    {
+        var ex = Assert.Throws<InvalidOperationException>(() => AppConfig.ParseCoordinate("PRECIP_LON", raw));
+        Assert.Contains("PRECIP_LON", ex.Message);
+    }
 }

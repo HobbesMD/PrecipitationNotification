@@ -45,7 +45,8 @@ nwsHttp.DefaultRequestHeaders.Accept.ParseAdd("application/geo+json");
 var nws = new NwsClient(nwsHttp);
 var now = TimeProvider.System.GetUtcNow();
 
-Console.WriteLine($"Fetching NWS forecast for {config.LatLon} ...");
+// Never log the coordinates: they pin a home, and stdout lands in Log Analytics in Azure.
+Console.WriteLine("Fetching NWS forecast ...");
 NwsForecast forecast;
 TimeZoneInfo zone;
 try
