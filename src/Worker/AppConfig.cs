@@ -17,16 +17,36 @@ internal sealed record AppConfig(
     TimeOnly WindowEnd,
     int ProbabilityThreshold)
 {
-    public static AppConfig FromEnvironment() => new(
-        Lat: ParseDouble("PRECIP_LAT"),
-        Lon: ParseDouble("PRECIP_LON"),
-        NtfyBaseUrl: Optional("PRECIP_NTFY_BASE_URL", "https://ntfy.sh"),
-        NtfyTopic: Require("PRECIP_NTFY_TOPIC"),
-        UserAgent: Require("PRECIP_USER_AGENT"),
-        TimeZone: TimeZoneInfo.FindSystemTimeZoneById(Optional("PRECIP_TIMEZONE", "America/New_York")),
-        WindowStart: ParseTime("PRECIP_WINDOW_START", "20:00"),
-        WindowEnd: ParseTime("PRECIP_WINDOW_END", "07:00"),
-        ProbabilityThreshold: ParseInt("PRECIP_PROBABILITY_THRESHOLD", 50));
+    public static AppConfig FromEnvironment()
+    {
+        var windowStart = ParseTime("PRECIP_WINDOW_START", "20:00");
+        var windowEnd = ParseTime("PRECIP_WINDOW_END", "07:00");
+        ValidateWindow(windowStart, windowEnd);
+
+        return new(
+            Lat: ParseDouble("PRECIP_LAT"),
+            Lon: ParseDouble("PRECIP_LON"),
+            NtfyBaseUrl: Optional("PRECIP_NTFY_BASE_URL", "https://ntfy.sh"),
+            NtfyTopic: Require("PRECIP_NTFY_TOPIC"),
+            UserAgent: Require("PRECIP_USER_AGENT"),
+            TimeZone: TimeZoneInfo.FindSystemTimeZoneById(Optional("PRECIP_TIMEZONE", "America/New_York")),
+            WindowStart: windowStart,
+            WindowEnd: windowEnd,
+            ProbabilityThreshold: ParseInt("PRECIP_PROBABILITY_THRESHOLD", 50));
+    }
+
+    /// <summary>
+    /// <see cref="Forecast.NightWindow.Resolve"/> always puts the end on the day after
+    /// the start, so a window that doesn't cross midnight (01:00 → 05:00) would
+    /// silently become 28 hours. Reject it here, before any run, rather than per-run.
+    /// </summary>
+    internal static void ValidateWindow(TimeOnly start, TimeOnly end)
+    {
+        if (start <= end)
+            throw new InvalidOperationException(
+                $"Overnight window must cross midnight: PRECIP_WINDOW_START ({start:HH:mm}) " +
+                $"must be later than PRECIP_WINDOW_END ({end:HH:mm}).");
+    }
 
     /// <summary>NWS rejects coordinates with more than 4 decimal places.</summary>
     public string LatLon => FormattableString.Invariant($"{Lat:0.####},{Lon:0.####}");
