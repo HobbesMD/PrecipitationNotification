@@ -565,7 +565,12 @@ public class ForecastEvaluatorTests
     [InlineData("Chance Light Rain", "Rain")]
     [InlineData("Freezing Rain", "Ice")]
     [InlineData("Light Freezing Drizzle", "Ice")]
-    [InlineData("Ice Pellets", "Ice")]
+    [InlineData("Ice Pellets", "Snow")]             // = sleet; grouped with sleet (D11)
+    [InlineData("Patchy Freezing Fog", "Rain")]     // fog is not precipitation
+    [InlineData("Rain And Patchy Freezing Fog", "Rain")]
+    [InlineData("Ice Fog", "Rain")]                 // real Alaska wording, not precipitation
+    [InlineData("Ice Crystals", "Rain")]
+    [InlineData("Rain Showers Nice", "Rain")]       // whole words only: "Nice" contains "ice"
     [InlineData("Snow Showers", "Snow")]
     [InlineData("Sleet", "Snow")]
     [InlineData("Chance Flurries", "Snow")]

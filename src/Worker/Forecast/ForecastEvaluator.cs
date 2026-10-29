@@ -1,3 +1,5 @@
+using System.Text.RegularExpressions;
+
 namespace Worker.Forecast;
 
 /// <summary>The decision engine: a pure function of forecast, window, rule and clock.</summary>
@@ -16,8 +18,12 @@ internal static class ForecastEvaluator
 
     // Fallbacks when gridpoint amounts are unavailable: the kind is read off the hourly
     // ShortForecast text. Order matters: ice outranks snow, as it does with amounts.
-    private static readonly string[] IceWords = ["freezing", "ice"];
-    private static readonly string[] SnowWords = ["snow", "sleet", "flurr", "wintry"];
+    // Whole-word precipitation phrases only: bare "freezing"/"ice" would match
+    // "Patchy Freezing Fog" and Alaska's "Ice Fog"/"Ice Crystals", none of which is precipitation.
+    private static readonly Regex IceWords = new(
+        @"\bfreezing (rain|drizzle)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    private static readonly Regex SnowWords = new(
+        @"\b(snow|sleet|ice pellets|flurry|flurries|wintry mix)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     /// <summary>
     /// Whether to alert is decided by probability alone: <c>ShouldAlert</c> is "any hit". The
@@ -106,7 +112,7 @@ internal static class ForecastEvaluator
 
     private static PrecipKind KindFromText(IReadOnlyList<HourlyForecast> hits)
     {
-        bool Any(string[] words) => hits.Any(h => words.Any(w => h.ShortForecast.Contains(w, StringComparison.OrdinalIgnoreCase)));
+        bool Any(Regex words) => hits.Any(h => words.IsMatch(h.ShortForecast));
 
         return Any(IceWords) ? PrecipKind.Ice
             : Any(SnowWords) ? PrecipKind.Snow

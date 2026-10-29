@@ -368,9 +368,11 @@ rain night sent *nothing*.
 - Real cancellation still propagates; only a timeout is treated as a gridpoint
   failure.
 
-**Kind without amounts:** taken from the hits' forecast text. "freezing" or
-"ice" means Ice; "snow", "sleet", "flurr" or "wintry" means Snow; anything else
-means Rain. Priority is High only for Ice. This is the Block 1 keyword heuristic,
+**Kind without amounts:** taken from the hits' forecast text, matching whole
+words and phrases only (tightened in [D15](#d15-review-round-2-whole-word-keywords-catch-all-gridpoint-degradation)).
+"freezing rain" or "freezing drizzle" means Ice; "snow", "sleet", "ice
+pellets", "flurry/flurries" or "wintry mix" means Snow; anything else means
+Rain. Priority is High only for Ice. This is the Block 1 keyword heuristic,
 kept as a fallback so the title isn't always "rain."
 
 **Rejected:** keeping D7's fail-loud behavior for the gridpoint. A flaky
@@ -455,3 +457,30 @@ naming the variable, the same as the window check (D5). **Tests:**
 includes a hit with `Pluie légère ❄`, and the title and tags stay ASCII. The
 kind and priority boundary tests now assert on the composed text as well
 (D12).
+
+#### D15. Review round 2: whole-word keywords, catch-all gridpoint degradation
+
+The reviewer re-checked the D11–D14 fixes. All seven original findings were
+confirmed fixed, but three new issues turned up. Two are fixed here; the third
+is D16.
+
+**Keyword false positives:** plain substring matching made "Patchy Freezing
+Fog," "Ice Fog" and "Ice Crystals" (real Alaska wording) into Ice at high
+priority. Fog is not precipitation. It also matched "ice" inside "Nice."
+Matching is now a whole-word regex on precipitation *phrases*: "freezing
+rain"/"freezing drizzle" for Ice, and "ice pellets" alongside "sleet" for Snow.
+They're the same thing, and the earlier rule had "Sleet" under Snow but "Ice
+Pellets" under Ice. **Tests:** the fog, crystals and "Nice" rows now give Rain.
+
+**Gridpoint exception gaps:** two failures still aborted the run despite D11:
+- an invalid response charset (`InvalidOperationException`);
+- a `null` `validTime` (`NullReferenceException` in the mapper).
+
+Both the fetch and the mapping now catch *everything* except real cancellation
+and degrade to "amounts unavailable." D11 promises no gridpoint failure can cost
+an alert, so a list of anticipated exception types was the wrong shape.
+**Tests:** `NwsClientTests` cover both inputs.
+
+**Noted, not changed:** because thresholds compare 0.1"-rounded values (D12),
+the effective cut-offs are ≥ 0.45" liquid, ≥ 0.95" snow and ≥ 0.05" ice. That's
+intended: the number you read in the message is the number the decision used.

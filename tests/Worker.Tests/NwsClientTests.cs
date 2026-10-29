@@ -84,6 +84,41 @@ public class NwsClientTests
     }
 
     [Fact]
+    public async Task Gridpoint_invalid_charset_degrades_to_no_amounts()
+    {
+        // ReadFromJsonAsync throws InvalidOperationException here, not HttpRequestException/JsonException.
+        var badCharset = () =>
+        {
+            var response = Json(FixtureFiles.Read(Dir + "gridpoint.json"))();
+            response.Content.Headers.ContentType!.CharSet = "not-a-charset";
+            return response;
+        };
+
+        var forecast = await Get(Client(grid: badCharset));
+
+        Assert.Equal(156, forecast.Hours.Count);
+        Assert.Null(forecast.Amounts);
+        Assert.NotNull(forecast.AmountsUnavailableReason);
+    }
+
+    [Fact]
+    public async Task Gridpoint_null_validTime_degrades_to_no_amounts()
+    {
+        const string grid = """
+            {"properties":{
+              "quantitativePrecipitation":{"uom":"wmoUnit:mm","values":[{"validTime":null,"value":1.0}]},
+              "snowfallAmount":{"uom":"wmoUnit:mm","values":[]},
+              "iceAccumulation":{"uom":"wmoUnit:mm","values":[]}}}
+            """;
+
+        var forecast = await Get(Client(grid: Json(grid)));
+
+        Assert.Equal(156, forecast.Hours.Count);
+        Assert.Null(forecast.Amounts);
+        Assert.Contains("quantitativePrecipitation", forecast.AmountsUnavailableReason);
+    }
+
+    [Fact]
     public async Task Points_without_grid_url_degrades_to_no_amounts()
     {
         var points = FixtureFiles.Read(Dir + "points.json")

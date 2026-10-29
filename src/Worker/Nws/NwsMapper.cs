@@ -83,5 +83,11 @@ internal static class NwsMapper
             reason = $"gridpoint {name} had a malformed validTime: {ex.Message}";
             return null;
         }
+        catch (Exception ex)
+        {
+            // e.g. a null validTime. Amounts are optional (D11), so any bad value degrades.
+            reason = $"gridpoint {name} had an unusable value: {ex.GetType().Name}: {ex.Message}";
+            return null;
+        }
     }
 }

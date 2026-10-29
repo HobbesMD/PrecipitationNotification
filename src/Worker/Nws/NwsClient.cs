@@ -74,5 +74,10 @@ internal sealed class NwsClient(HttpClient http)
         {
             return (null, $"gridpoint fetch failed: invalid JSON ({ex.Message})");
         }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            // Amounts are optional (D11): no gridpoint failure mode may cost us the alert.
+            return (null, $"gridpoint fetch failed: {ex.GetType().Name}: {ex.Message}");
+        }
     }
 }
