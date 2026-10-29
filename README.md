@@ -580,8 +580,10 @@ catches. Production's leg, UTC, is one that catches it.
 **Limitation:** the matrix multiplies the existing tests; it doesn't add
 cases. Which bugs a leg can see depends on which zones the rows use.
 
-**Enforcement:** the repo is now public, so `main` can require `test` and
-`image` to pass before a merge.
+**Enforcement:** the repo is now public, so a ruleset on `main` ("main: CI
+must pass") requires all three `test` legs and `image` to pass before any
+merge. It also blocks force-pushes to `main` and deleting it, because the
+commit history is part of the story.
 
 #### D18. Runtime image: chiseled `-extra`, proved by `--self-check`
 
@@ -653,6 +655,15 @@ a location where 23:00 UTC isn't early evening.
   arrives about 11 hours early, on a forecast that old.
 
 Per-location schedules belong with Block 4's Locations table.
+
+**In production:** the first scheduled execution started at
+2026-10-29 23:00:00Z (7 PM EDT) and succeeded in 38 s:
+- night `2026-10-29`, window `00:00Z → 11:00Z`;
+- 11 hours checked, no hits;
+- no notification sent.
+
+An earlier manual run with the threshold forced to 0 did reach the phone,
+which proves the Azure → ntfy path.
 
 **Tests:** `NightWindowTests.Utc_cron_run_precedes_that_evenings_window_in_New_York`
 runs at 23:00Z on six days: an ordinary summer day, an ordinary winter day, the
