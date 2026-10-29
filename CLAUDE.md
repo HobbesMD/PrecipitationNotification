@@ -28,18 +28,16 @@ interviews, so it gets the gate.)
 1. **Decide.** Lay out the real options, what each trades away, and a
    recommendation. I make the call. Don't pick for me silently.
 2. **Build.** Implement it the way we agreed.
-3. **Explain back.** Walk me through the code, then quiz me: why this design,
-   what breaks it, which edge case each test covers. Don't commit it until I can
-   answer without looking. Push back if my answer is wrong or vague.
-4. **Record.** Add the decision and the rejected alternative to the README in the
-   same commit.
+3. **Record.** In the same commit, add a README decision-log entry written as
+   interview prep: the decision, the rejected alternative, why, what would break
+   it, and which tests prove it. Plain English, self-contained — I study these
+   instead of being quizzed. (Quizzes dropped 2026-10-29; don't reintroduce them.)
 
-Slower is still the point. Scaffolding gets a short explanation; it doesn't need
-the gate.
+Scaffolding gets a short explanation; it doesn't need the gate.
 
 Disclosure: the README says plainly that this was built with an AI pair, and
-commits keep their `Co-Authored-By` trailer. The claim is "I can defend every
-line," not "I typed every line."
+commits keep their `Co-Authored-By` trailer. The claim is "every decision is
+mine and written down," not "I typed every line."
 
 ## Stack
 

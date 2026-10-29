@@ -5,9 +5,9 @@ A project for sending notifications when it is predicted to rain or snow, partic
 ## How this was built
 
 Built with an AI pair (Claude Code); commits it wrote carry a `Co-Authored-By`
-trailer. Design decisions are mine. Every decision is recorded here along with
-the alternative I rejected, and nothing in the decision engine, time handling,
-idempotency or tests was committed until I could explain it back without notes.
+trailer. Design decisions are mine: each one is recorded in the
+[decision log](#decision-log) with the alternative I rejected and the tests
+that prove it.
 
 ## Running (Block 1)
 
@@ -39,3 +39,8 @@ write-up lands in Block 8.
 | No tracing or metrics. | Block 6 |
 | Silence is ambiguous: "no precip" and "the job is dead" look identical. No heartbeat. | Block 6 |
 | Console app only — no container, no schedule, runs from a dev machine. | Blocks 3, 7 |
+
+## Decision log
+
+Each entry is the decision, the alternative rejected, why, what would break it,
+and the tests that prove it. Written to be read cold before an interview.
