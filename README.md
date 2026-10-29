@@ -51,14 +51,17 @@ and the tests that prove it. Written to be read cold before an interview.
 
 **Decision:** `TimeZoneInfo` + `DateTimeOffset` + `DateOnly`/`TimeOnly`, with
 `TimeProvider` at the composition root for the clock.
+
 **Rejected:** NodaTime. Its types (`LocalDate`, `ZonedDateTime`, explicit
 ambiguity resolvers) make local-vs-instant mistakes hard to write, and it's the
 textbook "senior" answer.
+
 **Why:** No dependency, nothing extra to map in EF Core (Block 4), and the BCL
 has had IANA zone ids on every OS since .NET 6. The price is discipline: the
 type system won't stop a wall-clock comparison, so the rule is *every
 comparison is between `DateTimeOffset` instants*. The tests (D2, D3) are what
 enforce it.
+
 **Watch out for:** Block 3's container image needs time-zone data (`tzdata`).
 Slim/chiseled .NET images can ship without it, and then
 `FindSystemTimeZoneById("America/New_York")` throws.
@@ -72,16 +75,20 @@ future. `NightDate` is the local date the window **starts**. A 5 PM run gets
 tonight. A 2 AM run gets the night already in progress, with
 `NightDate = yesterday`. A run at exactly 7:00:00 gets the next night, because
 the end is exclusive.
+
 **Rejected:** "always tonight's date," which is what Block 1 did. It's simpler,
 but any run between midnight and 7 AM looks at the *following* evening and
 never alerts about the night it's actually in.
+
 **Why it matters beyond this block:** `NightDate` becomes half of the
 idempotency key `(locationId, forecastNightDate)` in Block 4. A run at 11 PM and
 a retry at 1 AM must produce the *same* key, or the unique constraint can't stop
 the second alert.
+
 **What would break it:** taking "today" from the UTC date. At 8 PM in New
 York it's already tomorrow in UTC, so every evening run would pick the wrong
 night. A Sydney test row exists specifically to catch this.
+
 **Tests:** `NightWindowTests`. Runs at 17:00, 20:00, 23:00, 02:00, 06:59:59
 and 07:00:00, with exact UTC start, end and `NightDate` asserted for each.
 
@@ -100,9 +107,11 @@ Two rules decide edges that land on a DST transition:
 there really are two different 1 AM hours, and 8 PM → 7 AM spans 12 real
 hours. Counting both is correct; Block 1's debt list was wrong to call it a
 double-count. Spring-forward is 10 hours, because 2 AM never happens.
+
 **Rejected:** comparing wall-clock `DateTime`s, which is what Block 1 did. It
 happens to work at 8 PM and 7 AM in US zones, but it's wrong in general and
 it hides the reasoning.
+
 **Subtle bits:**
 - Wall-clock values are built with `DateTimeKind.Unspecified`. With `Local`,
   `TimeZoneInfo` would read them in the *machine's* zone, which is UTC in Azure,
@@ -126,7 +135,9 @@ it hides the reasoning.
 
 **Decision:** if neither yesterday's nor today's window ends after "now",
 `Resolve` throws `UnreachableException`.
+
 **Rejected:** silently trying tomorrow's window.
+
 **Why:** today's window ends on tomorrow's date, so it *always* ends after now.
 The case can only happen through a bug. A silent fallback would turn that bug
 into a wrong `NightDate`, which means a wrong idempotency key and duplicate or
@@ -138,9 +149,12 @@ behavior.
 **Decision:** `AppConfig.ValidateWindow` refuses to start unless the window
 start is later than the end. 20:00→07:00 is OK. 01:00→05:00, 07:00→20:00
 (swapped) and 20:00→20:00 are rejected.
+
 **Rejected:** validating inside `Resolve` on every run.
+
 **Why:** `Resolve` always puts the end on the day after the start, so a
 same-day window would silently become 28 hours. Bad config should fail once,
 at startup, with a message naming the settings, not be re-discovered every
 night by the decision engine.
+
 **Tests:** `AppConfigTests`.
