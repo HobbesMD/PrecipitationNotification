@@ -65,7 +65,7 @@ public class NwsMappingTests
     public void Amount_series_counts_match_fixture()
     {
         var grid = FixtureFiles.Load<GridpointResponse>(Dir + "gridpoint.json").Properties!;
-        var amounts = MapFixture().Amounts;
+        var amounts = MapFixture().Amounts!;
 
         Assert.Equal(13, grid.QuantitativePrecipitation!.Values!.Count);
         Assert.Equal(13, grid.SnowfallAmount!.Values!.Count);
@@ -102,7 +102,7 @@ public class NwsMappingTests
     [Fact]
     public void Missing_gridpoint_series_become_empty()
     {
-        var amounts = NwsMapper.ToForecast(Point, [], new GridpointProperties(null, null, null)).Amounts;
+        var amounts = NwsMapper.ToForecast(Point, [], new GridpointProperties(null, null, null)).Amounts!;
 
         Assert.Empty(amounts.Liquid);
         Assert.Empty(amounts.Snow);

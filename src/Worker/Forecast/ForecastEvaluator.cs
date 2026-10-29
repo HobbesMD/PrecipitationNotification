@@ -27,7 +27,7 @@ internal static class ForecastEvaluator
     public static NightAssessment Evaluate(
         NightWindow window,
         IReadOnlyList<HourlyForecast> hours,
-        PrecipAmounts amounts,
+        PrecipAmounts? amounts,
         AlertRule rule,
         DateTimeOffset now)
     {
@@ -42,6 +42,7 @@ internal static class ForecastEvaluator
 
         var peak = hits.Count == 0 ? 0 : hits.Max(h => h.PrecipProbability ?? 0);
 
+        amounts ??= PrecipAmounts.Empty; // Wave 0 placeholder; T3.1 implements the unavailable path
         var liquid = Inches(amounts.Liquid, from, to);
         var snow = Inches(amounts.Snow, from, to);
         var ice = Inches(amounts.Ice, from, to);
