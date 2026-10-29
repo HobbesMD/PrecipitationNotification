@@ -9,21 +9,37 @@ gets built. Read the next section before writing any code.
 
 ## How we work on this repo
 
-**I write the parts I'd have to defend in an interview. You scaffold.**
+**You write the code. I own every decision and must be able to defend all of it.**
 
-| You (Claude) | Me (Michael) |
+(Changed 2026-10-29. Originally I hand-wrote the right-hand column below; I no
+longer write code by hand. The column still marks what I'll be asked about in
+interviews, so it gets the gate.)
+
+| Scaffolding — just do it | Interview-defended — gated |
 |---|---|
 | `.csproj`, solution files, folder layout | The decision engine |
 | Dockerfile, docker-compose | All tests |
 | GitHub Actions yaml | Time-zone / overnight-window logic |
 | EF Core plumbing, migrations boilerplate | Idempotency design and enforcement |
 | Azure CLI command sequences | The README design doc |
-| Answering questions, reviewing my code, pushing back on design | |
 
-If I ask you to write something in the right-hand column, say so and ask whether
-I'm sure. Slower is the point — I get asked about this repo in interviews.
+**The gate**, for anything in the right-hand column:
 
-Review is always welcome. Write my tests for me is not.
+1. **Decide.** Lay out the real options, what each trades away, and a
+   recommendation. I make the call. Don't pick for me silently.
+2. **Build.** Implement it the way we agreed.
+3. **Explain back.** Walk me through the code, then quiz me: why this design,
+   what breaks it, which edge case each test covers. Don't commit it until I can
+   answer without looking. Push back if my answer is wrong or vague.
+4. **Record.** Add the decision and the rejected alternative to the README in the
+   same commit.
+
+Slower is still the point. Scaffolding gets a short explanation; it doesn't need
+the gate.
+
+Disclosure: the README says plainly that this was built with an AI pair, and
+commits keep their `Co-Authored-By` trailer. The claim is "I can defend every
+line," not "I typed every line."
 
 ## Stack
 
@@ -74,7 +90,7 @@ side projects die.
 | 7 | CI/CD | Actions: build → test → container → push → deploy. |
 | 8 | README as design doc | What I built, what I traded away, why. Diagrams. |
 
-**Current block: 1.**
+**Current block: 2.** (Block 1 done 2026-10-29 — notification confirmed on phone.)
 
 Block 1 leaves debt *on purpose* — hardcoded coordinates, naive time handling,
 topic in source, no tests, no retry. Block 2 fixes it. Don't fix it early; the
@@ -93,6 +109,8 @@ Set before Block 1, none committed:
 ## Conventions
 
 - Commit early and often. Steady weekly history is itself a hiring signal.
+- One branch per block (`block-N-<slug>`) → PR to main → **merge commit, never
+  squash**. The commit history is part of the story.
 - Public repo from commit one. Nothing secret in source, ever.
 - Every non-obvious tradeoff gets a line in the README when it's made, not at
   block 8 when I've forgotten why.

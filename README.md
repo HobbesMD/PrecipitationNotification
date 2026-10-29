@@ -2,6 +2,13 @@
 
 A project for sending notifications when it is predicted to rain or snow, particularly overnight.
 
+## How this was built
+
+Built with an AI pair (Claude Code); commits it wrote carry a `Co-Authored-By`
+trailer. Design decisions are mine. Every decision is recorded here along with
+the alternative I rejected, and nothing in the decision engine, time handling,
+idempotency or tests was committed until I could explain it back without notes.
+
 ## Running (Block 1)
 
 ```
