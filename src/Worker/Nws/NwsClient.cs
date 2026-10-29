@@ -13,6 +13,10 @@ internal sealed class NwsClient(HttpClient http)
 {
     private const string PointsBase = "https://api.weather.gov/points/";
 
+    /// <summary>Points → hourly forecast + raw gridpoint data, mapped to provider-neutral types.</summary>
+    public Task<NwsForecast> GetForecastAsync(string latLon, CancellationToken ct) =>
+        throw new NotImplementedException();
+
     public async Task<IReadOnlyList<ForecastPeriod>> GetHourlyForecastAsync(
         string latLon, CancellationToken ct)
     {
