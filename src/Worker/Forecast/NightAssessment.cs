@@ -25,7 +25,16 @@ internal sealed record NightAssessment(
     bool AmountsAvailable = true)
 {
     public bool ShouldAlert => Hits.Count > 0;
+
+    /// <summary>
+    /// Parts of the evaluated range the hourly forecast had no data for. Only ever
+    /// non-empty alongside hits: gaps with no hits throw <see cref="IncompleteForecastException"/>.
+    /// </summary>
+    public IReadOnlyList<ForecastGap> Gaps { get; init; } = [];
 }
+
+/// <summary>A stretch of the evaluated range with no hourly forecast data.</summary>
+internal sealed record ForecastGap(DateTimeOffset StartUtc, DateTimeOffset EndUtc);
 
 /// <summary>The one rounding rule shared by the evaluator's thresholds and the notification text.</summary>
 internal static class PrecipRounding

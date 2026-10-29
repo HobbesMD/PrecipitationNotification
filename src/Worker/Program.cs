@@ -10,7 +10,8 @@ using Worker.Notifications;
 // idempotency (Block 4), retry and backoff (Block 5).
 //
 // Exit codes: 0 ok (alerted or genuinely dry), 1 config, 2 NWS fetch,
-// 3 ntfy publish, 4 incomplete forecast (no data for part of the night).
+// 3 ntfy publish, 4 incomplete forecast (gaps in the hourly data and no hits
+// in the hours we do have; with hits, the alert goes out flagged as partial).
 
 var dryRun = args.Contains("--dry-run");
 var inv = CultureInfo.InvariantCulture;
@@ -71,6 +72,9 @@ catch (IncompleteForecastException ex)
     Console.Error.WriteLine($"Incomplete forecast: {ex.Message}");
     return 4;
 }
+
+foreach (var gap in assessment.Gaps)
+    Console.Error.WriteLine($"Warning: no hourly data {gap.StartUtc:o} -> {gap.EndUtc:o}; alerting on the hours we have.");
 
 var hoursInWindow = forecast.Hours.Count(h => h.Start < window.EndUtc && h.End > window.StartUtc);
 Console.WriteLine($"Time zone: {zone.Id}");

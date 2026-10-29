@@ -354,6 +354,79 @@ public class ForecastEvaluatorTests
         Assert.Equal(Instant("2026-07-16T01:00:00-04:00"), ex.GapEndUtc);
     }
 
+    // ---- Gaps with hits: alert on the evidence we have, flag the rest as unknown (D16) ----
+
+    [Fact]
+    public void Missing_tail_with_hits_alerts_and_reports_the_gap()
+    {
+        // The reviewer's case: 90% every hour 8 PM-3 AM, nothing from 3 AM to 7 AM.
+        var hours = Span("2026-07-15T20:00:00-04:00", "2026-07-16T03:00:00-04:00", pop: 90);
+
+        var a = Evaluate(Summer, hours, threshold: 50, BeforeSummer);
+
+        Assert.True(a.ShouldAlert);
+        Assert.Equal(7, a.Hits.Count);
+        var gap = Assert.Single(a.Gaps);
+        Assert.Equal(Instant("2026-07-16T03:00:00-04:00"), gap.StartUtc);
+        Assert.Equal(Summer.EndUtc, gap.EndUtc);
+    }
+
+    [Fact]
+    public void Every_gap_is_reported_when_there_are_hits()
+    {
+        // Data 20-22, 23-01 (with a hit), 03-05; holes at 22-23, 01-03, 05-07.
+        var hours = Span("2026-07-15T20:00:00-04:00", "2026-07-15T22:00:00-04:00")
+            .Concat(Span("2026-07-15T23:00:00-04:00", "2026-07-16T01:00:00-04:00", pop: 70))
+            .Concat(Span("2026-07-16T03:00:00-04:00", "2026-07-16T05:00:00-04:00"))
+            .ToList();
+
+        var a = Evaluate(Summer, hours, threshold: 50, BeforeSummer);
+
+        Assert.Equal(
+            [
+                new ForecastGap(Instant("2026-07-15T22:00:00-04:00"), Instant("2026-07-15T23:00:00-04:00")),
+                new ForecastGap(Instant("2026-07-16T01:00:00-04:00"), Instant("2026-07-16T03:00:00-04:00")),
+                new ForecastGap(Instant("2026-07-16T05:00:00-04:00"), Summer.EndUtc),
+            ],
+            a.Gaps);
+    }
+
+    [Fact]
+    public void Gap_with_only_sub_threshold_hours_still_throws()
+    {
+        // 49% everywhere we have data is "no hits", so the hole could be hiding the rain.
+        var hours = Span("2026-07-15T20:00:00-04:00", "2026-07-16T03:00:00-04:00", pop: 49);
+
+        Gap(Summer, hours, BeforeSummer);
+    }
+
+    [Fact]
+    public void Complete_forecast_reports_no_gaps()
+    {
+        var a = Evaluate(Summer, Span("2026-07-15T20:00:00-04:00", "2026-07-16T07:00:00-04:00", pop: 90), 50, BeforeSummer);
+
+        Assert.Empty(a.Gaps);
+    }
+
+    [Fact]
+    public void Gaps_are_flagged_in_the_message_in_local_time()
+    {
+        var hours = Span("2026-07-15T20:00:00-04:00", "2026-07-16T03:00:00-04:00", pop: 90);
+        var a = Evaluate(Summer, hours, threshold: 50, BeforeSummer);
+
+        var body = NotificationComposer.Compose(a, NewYork).Body;
+
+        Assert.Contains("Forecast incomplete: no data 3:00 AM-7:00 AM", body);
+    }
+
+    [Fact]
+    public void Complete_forecast_message_has_no_incomplete_line()
+    {
+        var a = Evaluate(Summer, Span("2026-07-15T20:00:00-04:00", "2026-07-16T07:00:00-04:00", pop: 90), 50, BeforeSummer);
+
+        Assert.DoesNotContain("incomplete", NotificationComposer.Compose(a, NewYork).Body, StringComparison.OrdinalIgnoreCase);
+    }
+
     [Fact]
     public void Missing_tail_throws_up_to_the_window_end()
     {

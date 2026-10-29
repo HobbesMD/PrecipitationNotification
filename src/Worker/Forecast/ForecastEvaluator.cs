@@ -37,10 +37,11 @@ internal static class ForecastEvaluator
     /// treated as 0. All comparisons are on instants, never wall-clock time, so the repeated fall-back
     /// hour and the missing spring-forward hour need no special case.
     /// <para>
-    /// The hours must cover the whole effective range with no gap, otherwise
-    /// <see cref="IncompleteForecastException"/> is thrown: a hole in the data would look exactly like
-    /// a dry night. "Covered" means some hour exists; a null probability inside it is still covered.
-    /// Overlapping or duplicate hours are tolerated.
+    /// Gaps in the hourly data are found first. With no hits, any gap throws
+    /// <see cref="IncompleteForecastException"/>: a hole in the data would look exactly like a dry
+    /// night. With hits, the evidence we do have is enough to warn, so the alert goes out and the
+    /// gaps ride along in <see cref="NightAssessment.Gaps"/> for the message to flag. "Covered" means
+    /// some hour exists; a null probability inside it is still covered. Overlaps and duplicates are fine.
     /// </para>
     /// <para>
     /// A null <paramref name="amounts"/> means the gridpoint data couldn't be used. The result is
@@ -58,13 +59,16 @@ internal static class ForecastEvaluator
         var from = window.StartUtc > now ? window.StartUtc : now;
         var to = window.EndUtc;
 
-        RequireCoverage(hours, from, to);
+        var gaps = FindGaps(hours, from, to);
 
         var hits = hours
             .Where(h => h.Start < to && h.End > from)
             .Where(h => (h.PrecipProbability ?? 0) >= rule.ProbabilityThreshold)
             .OrderBy(h => h.Start)
             .ToList();
+
+        if (hits.Count == 0 && gaps.Count > 0)
+            throw new IncompleteForecastException(gaps[0].StartUtc, gaps[0].EndUtc);
 
         var peak = hits.Count == 0 ? 0 : hits.Max(h => h.PrecipProbability ?? 0);
 
@@ -73,7 +77,7 @@ internal static class ForecastEvaluator
             var guessed = KindFromText(hits);
             return new NightAssessment(window, hits, peak, guessed, 0, 0, 0,
                 guessed == PrecipKind.Ice ? AlertPriority.High : AlertPriority.Default,
-                AmountsAvailable: false);
+                AmountsAvailable: false) { Gaps = gaps };
         }
 
         var liquid = Inches(amounts.Liquid, from, to);
@@ -90,24 +94,27 @@ internal static class ForecastEvaluator
             ? AlertPriority.High
             : AlertPriority.Default;
 
-        return new NightAssessment(window, hits, peak, kind, liquid, snow, ice, priority);
+        return new NightAssessment(window, hits, peak, kind, liquid, snow, ice, priority) { Gaps = gaps };
     }
 
-    /// <summary>Walks the hours in start order with a cursor from <paramref name="from"/>; the first hole throws.</summary>
-    private static void RequireCoverage(IReadOnlyList<HourlyForecast> hours, DateTimeOffset from, DateTimeOffset to)
+    /// <summary>Walks the hours in start order with a cursor from <paramref name="from"/>, collecting every hole.</summary>
+    private static List<ForecastGap> FindGaps(IReadOnlyList<HourlyForecast> hours, DateTimeOffset from, DateTimeOffset to)
     {
+        var gaps = new List<ForecastGap>();
         var cursor = from;
         foreach (var h in hours.OrderBy(h => h.Start))
         {
-            if (cursor >= to) return;
+            if (cursor >= to) break;
             if (h.End <= cursor) continue;
+            if (h.Start >= to) break;
             if (h.Start > cursor)
-                throw new IncompleteForecastException(cursor, h.Start < to ? h.Start : to);
+                gaps.Add(new ForecastGap(cursor, h.Start));
             cursor = h.End;
         }
 
         if (cursor < to)
-            throw new IncompleteForecastException(cursor, to);
+            gaps.Add(new ForecastGap(cursor, to));
+        return gaps;
     }
 
     private static PrecipKind KindFromText(IReadOnlyList<HourlyForecast> hits)

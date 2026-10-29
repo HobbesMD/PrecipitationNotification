@@ -416,6 +416,8 @@ Both ice+snow title forms are covered.
 
 #### D13. Review: no data for part of the night is a failed run, never a dry one
 
+*(Revised by [D16](#d16-review-round-2-a-gap-blocks-a-dry-verdict-not-an-alert): a gap only fails the run when there are no hits.)*
+
 **Finding:** missing, stale or partial hourly data produced no hits, so the
 job logged "No notification sent" and exited 0. That's the silence-is-ambiguous
 problem from the brief, created by the decision engine itself.
@@ -484,3 +486,38 @@ an alert, so a list of anticipated exception types was the wrong shape.
 **Noted, not changed:** because thresholds compare 0.1"-rounded values (D12),
 the effective cut-offs are ≥ 0.45" liquid, ≥ 0.95" snow and ≥ 0.05" ice. That's
 intended: the number you read in the message is the number the decision used.
+
+#### D16. Review round 2: a gap blocks a "dry" verdict, not an alert
+
+**Finding:** D13 overreached. Any gap threw before hits were counted, so 90% rain
+every hour from 8 PM to 3 AM, with NWS missing 3–7 AM, exited 4 and sent
+*nothing*. That's the same failure class as the original D11 finding: an input
+that doesn't decide the alert ended up preventing it.
+
+**Decision:** gaps are collected, not thrown on sight.
+- **Gaps and no hits:** `IncompleteForecastException`, exit 4, exactly as D13.
+  We can't call the night dry when part of it is unknown.
+- **Gaps and hits:** the alert goes out. The body adds a line naming the
+  unknown stretch in local time, e.g.
+  `Forecast incomplete: no data 3:00 AM-7:00 AM`, and the run logs a warning
+  and exits 0. The hits we have are enough evidence to warn; the rest is
+  flagged, not hidden.
+
+**Rejected:**
+- Alert *and* exit 4. Monitoring would then call a run that did its job a
+  failure, and that blurs what exit 4 means.
+- Keeping D13 as-is. It's the strictest about data quality, but it can
+  suppress a real rain warning.
+
+**The principle, now stated once:** *no input that doesn't decide the alert may
+prevent it.* Neither amounts (D11) nor coverage (here) can stop a probability
+hit from reaching the phone. And no missing data may ever produce a "dry"
+verdict (D13).
+
+**Tests:**
+- the reviewer's case (exact gap, 7 hits);
+- every gap collected (three holes);
+- a gap with only 49% hours still throws;
+- a complete forecast has no gaps;
+- the message line appears in local time when there are gaps, and is absent
+  without them.

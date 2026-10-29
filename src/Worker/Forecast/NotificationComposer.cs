@@ -92,6 +92,16 @@ internal static class NotificationComposer
                 sb.Append('\n').Append(string.Join(" · ", amounts));
         }
 
+        // Partial data still alerts (the hits we have are evidence), but the reader must know
+        // the rest of the night is unknown, not dry.
+        if (a.Gaps.Count > 0)
+        {
+            var spans = a.Gaps.Select(g =>
+                TimeZoneInfo.ConvertTime(g.StartUtc, zone).ToString("h:mm tt", Inv) + "-" +
+                TimeZoneInfo.ConvertTime(g.EndUtc, zone).ToString("h:mm tt", Inv));
+            sb.Append('\n').Append("Forecast incomplete: no data ").Append(string.Join(", ", spans));
+        }
+
         foreach (var hit in a.Hits)
         {
             var local = TimeZoneInfo.ConvertTime(hit.Start, zone);
