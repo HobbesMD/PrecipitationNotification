@@ -99,28 +99,80 @@ public class NwsMappingTests
         Assert.Equal(55, hour.PrecipProbability);
     }
 
-    [Fact]
-    public void Missing_gridpoint_series_become_empty()
-    {
-        var amounts = NwsMapper.ToForecast(Point, [], new GridpointProperties(null, null, null)).Amounts!;
+    private static readonly GridSeries Ok = new("wmoUnit:mm", []);
 
-        Assert.Empty(amounts.Liquid);
-        Assert.Empty(amounts.Snow);
-        Assert.Empty(amounts.Ice);
+    private static NwsForecast MapGrid(GridpointProperties? grid) => NwsMapper.ToForecast(Point, [], grid);
+
+    private static void AssertUnavailable(NwsForecast forecast, string reasonContains)
+    {
+        Assert.Null(forecast.Amounts);
+        Assert.Contains(reasonContains, forecast.AmountsUnavailableReason);
     }
+
+    [Fact]
+    public void Available_amounts_have_no_reason()
+    {
+        var forecast = MapFixture();
+        Assert.NotNull(forecast.Amounts);
+        Assert.Null(forecast.AmountsUnavailableReason);
+    }
+
+    [Fact]
+    public void Null_grid_properties_make_amounts_unavailable() =>
+        AssertUnavailable(MapGrid(null), "no properties");
+
+    [Fact]
+    public void Absent_snowfall_series_makes_amounts_unavailable() =>
+        AssertUnavailable(MapGrid(new GridpointProperties(Ok, null, Ok)), "snowfallAmount");
 
     [Theory]
     [InlineData("wmoUnit:m")]
     [InlineData("wmoUnit:degC")]
     [InlineData(null)]
-    public void Non_millimetre_unit_throws(string? uom)
-    {
-        var grid = new GridpointProperties(
-            new GridSeries("wmoUnit:mm", []),
-            new GridSeries(uom, []),
-            null);
+    public void Non_millimetre_unit_makes_amounts_unavailable(string? uom) =>
+        AssertUnavailable(MapGrid(new GridpointProperties(Ok, new GridSeries(uom, []), Ok)), "snowfallAmount");
 
-        var ex = Assert.Throws<InvalidOperationException>(() => NwsMapper.ToForecast(Point, [], grid));
-        Assert.Contains("snowfallAmount", ex.Message);
+    [Fact]
+    public void Malformed_valid_time_makes_amounts_unavailable()
+    {
+        var bad = new GridSeries("wmoUnit:mm", [new GridValue("garbage", 1)]);
+        AssertUnavailable(MapGrid(new GridpointProperties(Ok, Ok, bad)), "iceAccumulation");
+    }
+
+    [Fact]
+    public void Offsetless_valid_time_makes_amounts_unavailable()
+    {
+        var bad = new GridSeries("wmoUnit:mm", [new GridValue("2026-10-29T12:00:00/PT1H", 1)]);
+        AssertUnavailable(MapGrid(new GridpointProperties(bad, Ok, Ok)), "quantitativePrecipitation");
+    }
+
+    [Fact]
+    public void Present_but_empty_series_is_genuine_no_data()
+    {
+        var forecast = MapGrid(new GridpointProperties(Ok, Ok, Ok));
+
+        Assert.Null(forecast.AmountsUnavailableReason);
+        Assert.Empty(forecast.Amounts!.Liquid);
+        Assert.Empty(forecast.Amounts.Snow);
+        Assert.Empty(forecast.Amounts.Ice);
+    }
+
+    [Fact]
+    public void Caller_supplied_reason_wins_and_amounts_are_null()
+    {
+        var forecast = NwsMapper.ToForecast(Point, [], new GridpointProperties(Ok, Ok, Ok), "gridpoint fetch failed: 500");
+        AssertUnavailable(forecast, "500");
+    }
+
+    [Fact]
+    public void Hourly_start_time_without_offset_fails_deserialization()
+    {
+        const string json = """
+            {"number":1,"startTime":"2026-10-30T20:00:00","endTime":"2026-10-30T21:00:00-04:00",
+             "isDaytime":false,"temperature":50}
+            """;
+
+        Assert.Throws<JsonException>(() =>
+            JsonSerializer.Deserialize<ForecastPeriod>(json, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
     }
 }

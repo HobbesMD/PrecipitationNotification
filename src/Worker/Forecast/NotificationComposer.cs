@@ -11,9 +11,6 @@ internal static class NotificationComposer
 {
     private static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
 
-    /// <summary>Amounts below this print as "trace" in the body and are dropped from the title (they would round to 0.0).</summary>
-    private const double TraceCeiling = 0.05;
-
     /// <summary>
     /// Fall-back hour labels, keyed by the zone's standard UTC offset (hours).
     /// A plain lookup on purpose: offsets alone collide (-5 is EST and CDT), so the
@@ -44,8 +41,22 @@ internal static class NotificationComposer
             assessment.Priority == AlertPriority.High ? "high" : "default");
     }
 
+    /// <summary>
+    /// Every number shown is <see cref="PrecipRounding.Tenths"/> of the raw inches, the same rounding the
+    /// evaluator's thresholds use, so the text can't disagree with the decision. An amount clause that
+    /// would read 0.0 is dropped. When ice is the kind but a shovel-worthy snowfall rides along, the
+    /// title names both so the snowstorm isn't hidden behind the ice.
+    /// </summary>
     private static string BuildTitle(NightAssessment a)
     {
+        var peak = a.PeakProbability.ToString(Inv);
+
+        if (a.Kind == PrecipKind.Ice && a.AmountsAvailable && PrecipRounding.Tenths(a.SnowInches) >= 1.0)
+        {
+            var ice = PrecipRounding.Tenths(a.IceInches) > 0 ? $" ({Inches(a.IceInches)})" : "";
+            return $"Overnight ice{ice} + {Inches(a.SnowInches)} snow, up to {peak}%";
+        }
+
         var (label, inches) = a.Kind switch
         {
             PrecipKind.Snow => ("snow", a.SnowInches),
@@ -53,8 +64,8 @@ internal static class NotificationComposer
             _ => ("rain", a.LiquidInches),
         };
 
-        var amount = inches >= TraceCeiling ? $" {Inches(inches)} expected," : "";
-        return $"Overnight {label}:{amount} up to {a.PeakProbability.ToString(Inv)}%";
+        var amount = a.AmountsAvailable && PrecipRounding.Tenths(inches) > 0 ? $" {Inches(inches)} expected," : "";
+        return $"Overnight {label}:{amount} up to {peak}%";
     }
 
     private static string BuildBody(NightAssessment a, TimeZoneInfo zone)
@@ -67,12 +78,19 @@ internal static class NotificationComposer
           .Append(" -> ")
           .Append(end.ToString("ddd MMM d h:mm tt", Inv));
 
-        var amounts = new List<string>();
-        AddAmount(amounts, a.LiquidInches, "liquid");
-        AddAmount(amounts, a.SnowInches, "snow");
-        AddAmount(amounts, a.IceInches, "ice");
-        if (amounts.Count > 0)
-            sb.Append('\n').Append(string.Join(" · ", amounts));
+        if (!a.AmountsAvailable)
+        {
+            sb.Append('\n').Append("Amounts unavailable from NWS");
+        }
+        else
+        {
+            var amounts = new List<string>();
+            AddAmount(amounts, a.LiquidInches, "liquid");
+            AddAmount(amounts, a.SnowInches, "snow");
+            AddAmount(amounts, a.IceInches, "ice");
+            if (amounts.Count > 0)
+                sb.Append('\n').Append(string.Join(" · ", amounts));
+        }
 
         foreach (var hit in a.Hits)
         {
@@ -94,10 +112,10 @@ internal static class NotificationComposer
     private static void AddAmount(List<string> parts, double inches, string name)
     {
         if (inches <= 0) return;
-        parts.Add(inches < TraceCeiling ? $"trace {name}" : $"{Inches(inches)} {name}");
+        parts.Add(PrecipRounding.Tenths(inches) == 0 ? $"trace {name}" : $"{Inches(inches)} {name}");
     }
 
-    private static string Inches(double v) => v.ToString("0.0", Inv) + "\"";
+    private static string Inches(double raw) => PrecipRounding.Tenths(raw).ToString("0.0", Inv) + "\"";
 
     private static string Abbreviate(TimeSpan offset, TimeZoneInfo zone)
     {

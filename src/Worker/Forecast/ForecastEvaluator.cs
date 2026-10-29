@@ -6,11 +6,18 @@ internal static class ForecastEvaluator
     private const double MmPerInch = 25.4;
 
     // Kind: any ice wins (it is the hazard), then a measurable snowfall, else rain.
+    // Every threshold below compares PrecipRounding.Tenths(amount), the same rounding the
+    // composer prints, so a displayed 0.1 in. of snow always means the decision saw snow.
     private const double SnowKindInches = 0.1;
 
     // Priority: the "go outside tonight" line — a shovel-worthy snowfall, any ice, a soaking rain.
     private const double HighPrioritySnowInches = 1.0;
     private const double HighPriorityLiquidInches = 0.5;
+
+    // Fallbacks when gridpoint amounts are unavailable: the kind is read off the hourly
+    // ShortForecast text. Order matters: ice outranks snow, as it does with amounts.
+    private static readonly string[] IceWords = ["freezing", "ice"];
+    private static readonly string[] SnowWords = ["snow", "sleet", "flurr", "wintry"];
 
     /// <summary>
     /// Whether to alert is decided by probability alone: <c>ShouldAlert</c> is "any hit". The
@@ -23,6 +30,17 @@ internal static class ForecastEvaluator
     /// all, so the hour containing <paramref name="now"/> still counts. A null probability is "no data",
     /// treated as 0. All comparisons are on instants, never wall-clock time, so the repeated fall-back
     /// hour and the missing spring-forward hour need no special case.
+    /// <para>
+    /// The hours must cover the whole effective range with no gap, otherwise
+    /// <see cref="IncompleteForecastException"/> is thrown: a hole in the data would look exactly like
+    /// a dry night. "Covered" means some hour exists; a null probability inside it is still covered.
+    /// Overlapping or duplicate hours are tolerated.
+    /// </para>
+    /// <para>
+    /// A null <paramref name="amounts"/> means the gridpoint data couldn't be used. The result is
+    /// flagged <c>AmountsAvailable: false</c> with zero totals, kind is guessed from the hits' text,
+    /// and priority is High only for ice.
+    /// </para>
     /// </remarks>
     public static NightAssessment Evaluate(
         NightWindow window,
@@ -34,6 +52,8 @@ internal static class ForecastEvaluator
         var from = window.StartUtc > now ? window.StartUtc : now;
         var to = window.EndUtc;
 
+        RequireCoverage(hours, from, to);
+
         var hits = hours
             .Where(h => h.Start < to && h.End > from)
             .Where(h => (h.PrecipProbability ?? 0) >= rule.ProbabilityThreshold)
@@ -42,20 +62,55 @@ internal static class ForecastEvaluator
 
         var peak = hits.Count == 0 ? 0 : hits.Max(h => h.PrecipProbability ?? 0);
 
-        amounts ??= PrecipAmounts.Empty; // Wave 0 placeholder; T3.1 implements the unavailable path
+        if (amounts is null)
+        {
+            var guessed = KindFromText(hits);
+            return new NightAssessment(window, hits, peak, guessed, 0, 0, 0,
+                guessed == PrecipKind.Ice ? AlertPriority.High : AlertPriority.Default,
+                AmountsAvailable: false);
+        }
+
         var liquid = Inches(amounts.Liquid, from, to);
         var snow = Inches(amounts.Snow, from, to);
         var ice = Inches(amounts.Ice, from, to);
 
-        var kind = ice > 0 ? PrecipKind.Ice
-            : snow >= SnowKindInches ? PrecipKind.Snow
+        var kind = PrecipRounding.Tenths(ice) > 0 ? PrecipKind.Ice
+            : PrecipRounding.Tenths(snow) >= SnowKindInches ? PrecipKind.Snow
             : PrecipKind.Rain;
 
-        var priority = snow >= HighPrioritySnowInches || ice > 0 || liquid >= HighPriorityLiquidInches
+        var priority = PrecipRounding.Tenths(snow) >= HighPrioritySnowInches
+            || PrecipRounding.Tenths(ice) > 0
+            || PrecipRounding.Tenths(liquid) >= HighPriorityLiquidInches
             ? AlertPriority.High
             : AlertPriority.Default;
 
         return new NightAssessment(window, hits, peak, kind, liquid, snow, ice, priority);
+    }
+
+    /// <summary>Walks the hours in start order with a cursor from <paramref name="from"/>; the first hole throws.</summary>
+    private static void RequireCoverage(IReadOnlyList<HourlyForecast> hours, DateTimeOffset from, DateTimeOffset to)
+    {
+        var cursor = from;
+        foreach (var h in hours.OrderBy(h => h.Start))
+        {
+            if (cursor >= to) return;
+            if (h.End <= cursor) continue;
+            if (h.Start > cursor)
+                throw new IncompleteForecastException(cursor, h.Start < to ? h.Start : to);
+            cursor = h.End;
+        }
+
+        if (cursor < to)
+            throw new IncompleteForecastException(cursor, to);
+    }
+
+    private static PrecipKind KindFromText(IReadOnlyList<HourlyForecast> hits)
+    {
+        bool Any(string[] words) => hits.Any(h => words.Any(w => h.ShortForecast.Contains(w, StringComparison.OrdinalIgnoreCase)));
+
+        return Any(IceWords) ? PrecipKind.Ice
+            : Any(SnowWords) ? PrecipKind.Snow
+            : PrecipKind.Rain;
     }
 
     private static double Inches(IReadOnlyList<IntervalAmount> series, DateTimeOffset from, DateTimeOffset to) =>

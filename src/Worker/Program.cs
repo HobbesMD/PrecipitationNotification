@@ -8,6 +8,9 @@ using Worker.Notifications;
 // location's own time zone -> evaluate -> compose -> ntfy. Pass --dry-run to
 // print the message instead of sending it. Still missing: persistence and
 // idempotency (Block 4), retry and backoff (Block 5).
+//
+// Exit codes: 0 ok (alerted or genuinely dry), 1 config, 2 NWS fetch,
+// 3 ntfy publish, 4 incomplete forecast (no data for part of the night).
 
 var dryRun = args.Contains("--dry-run");
 var inv = CultureInfo.InvariantCulture;
@@ -52,10 +55,22 @@ catch (Exception ex)
 }
 
 Console.WriteLine($"Got {forecast.Hours.Count} hourly periods.");
+if (forecast.Amounts is null)
+    Console.Error.WriteLine($"Warning: amounts unavailable ({forecast.AmountsUnavailableReason}); alerting on probability only.");
 
 var window = NightWindow.Resolve(now, zone, config.WindowStart, config.WindowEnd);
-var assessment = ForecastEvaluator.Evaluate(
-    window, forecast.Hours, forecast.Amounts, new AlertRule(config.ProbabilityThreshold), now);
+NightAssessment assessment;
+try
+{
+    assessment = ForecastEvaluator.Evaluate(
+        window, forecast.Hours, forecast.Amounts, new AlertRule(config.ProbabilityThreshold), now);
+}
+catch (IncompleteForecastException ex)
+{
+    // Not a dry night: we don't know. Fail the run so it can't be mistaken for "no precipitation".
+    Console.Error.WriteLine($"Incomplete forecast: {ex.Message}");
+    return 4;
+}
 
 var hoursInWindow = forecast.Hours.Count(h => h.Start < window.EndUtc && h.End > window.StartUtc);
 Console.WriteLine($"Time zone: {zone.Id}");

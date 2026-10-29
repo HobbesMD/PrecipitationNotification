@@ -1,4 +1,3 @@
-using System.Globalization;
 using System.Xml;
 
 namespace Worker.Forecast;
@@ -51,7 +50,7 @@ internal sealed record PrecipAmounts(
         return total;
     }
 
-    /// <summary>Parses an NWS <c>validTime</c> such as <c>2026-10-29T12:00:00+00:00/PT6H</c>. A null amount means 0.</summary>
+    /// <summary>Parses an NWS <c>validTime</c> such as <c>2026-10-29T12:00:00+00:00/PT6H</c>. A null amount means 0. The start must carry a UTC offset.</summary>
     public static IntervalAmount ParseValidTime(string validTime, double? mm)
     {
         var parts = validTime.Split('/');
@@ -60,9 +59,14 @@ internal sealed record PrecipAmounts(
             throw new FormatException($"validTime '{validTime}' must be '<start>/<duration>'.");
         }
 
-        if (!DateTimeOffset.TryParse(parts[0], CultureInfo.InvariantCulture, DateTimeStyles.None, out var start))
+        DateTimeOffset start;
+        try
         {
-            throw new FormatException($"validTime '{validTime}' has an unparseable start '{parts[0]}'.");
+            start = StrictTimestamps.Parse(parts[0]);
+        }
+        catch (FormatException ex)
+        {
+            throw new FormatException($"validTime '{validTime}' has an unusable start '{parts[0]}'.", ex);
         }
 
         TimeSpan duration;

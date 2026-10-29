@@ -36,7 +36,7 @@ later block. Repaid rows stay, struck through, so the history is visible.
 | ~~`PrecipDecision` is throwaway naive code, not a tested pure function. No captured-payload tests.~~ | ✅ Block 2 ([D9](#d9-probability-decides-whether-to-alert-amounts-decide-how-loudly)) |
 | NWS gridpoint URL is re-fetched every run instead of cached. *(Moved from Block 2: the cache belongs on the Location row, and a container has no persistent disk to cache on.)* | Block 4 |
 | Spring-forward test payload is hand-built (`tests/Fixtures/nws/synthetic-dst-springforward`). *(New in Block 2.)* | Real capture ~2027-03-08 |
-| Coordinates, topic, and threshold come from `.env` with no schema; only the window is validated. | Block 4 |
+| Coordinates and topic come from `.env` with no schema; only the window and threshold are validated. | Block 4 |
 | No retry, backoff, circuit breaker, or timeout tuning on the HTTP calls. | Block 5 |
 | ~~Single weather provider, no abstraction seam.~~ Seam exists ([D7](#d7-nws-responses-map-onto-provider-neutral-types-surprises-fail-loudly)); second provider not yet plugged in. | Block 5 |
 | No persistence and no idempotency — every run that clears the threshold sends a notification. | Block 4 |
@@ -165,6 +165,8 @@ night by the decision engine.
 
 #### D6. Amounts are split across the window pro-rata
 
+*(Revised by [D11](#d11-review-amounts-are-optional-a-gridpoint-failure-never-blocks-an-alert): an absent series now makes amounts unavailable rather than zero. A null value inside a present series is still 0.)*
+
 **Context:** NWS gridpoint data gives accumulations (mm) over UTC intervals,
 usually 6 hours: `2026-11-01T00:00:00+00:00/PT6H` is 8 PM–2 AM EDT. Intervals
 straddle the window edges, so some fraction of each has to be counted.
@@ -204,6 +206,8 @@ negative durations throw `FormatException`.
 
 #### D7. NWS responses map onto provider-neutral types; surprises fail loudly
 
+*(Revised by [D11](#d11-review-amounts-are-optional-a-gridpoint-failure-never-blocks-an-alert): gridpoint problems now degrade instead of failing the run.)*
+
 **Decision:** `NwsMapper` translates NWS DTOs into `HourlyForecast` and
 `PrecipAmounts`. The decision engine never sees an NWS type, which is the seam
 Open-Meteo plugs into in Block 5. `NwsClient` fetches `/points`, then the hourly
@@ -235,6 +239,8 @@ HTTP:
 The HTTP path itself is untested until WireMock arrives in Block 5.
 
 #### D8. The notification answers "cushions or shovel" and stays unambiguous on DST nights
+
+*(Revised by [D12](#d12-review-one-rounding-rule-for-the-decision-and-the-text): one rounding rule for thresholds and text, and an ice+snow title.)*
 
 **Decision:** `NotificationComposer` is a pure function from `NightAssessment`
 to title, body, tags and priority.
@@ -271,6 +277,8 @@ was untestable, and it's where the ambiguous 1 AM labels came from.
 - empty hits throws.
 
 #### D9. Probability decides *whether* to alert; amounts decide *how loudly*
+
+*(Revised by [D12](#d12-review-one-rounding-rule-for-the-decision-and-the-text): thresholds compare rounded values. Revised by [D13](#d13-review-no-data-for-part-of-the-night-is-a-failed-run-never-a-dry-one): incomplete hourly data now fails the run.)*
 
 **Decision:** `ForecastEvaluator.Evaluate` is the decision engine: a pure
 function of window, forecast, rule and clock, with no I/O and no `DateTime.Now`.
@@ -334,3 +342,116 @@ missing `tzdata` would make *every* id unknown (see D1).
 **Also in this commit:** `--dry-run` prints the composed message without
 publishing, so the full pipeline can be checked against live data without
 buzzing a phone.
+
+### Block 2: independent review
+
+After D1–D10, a separate reviewer that wrote none of the code checked the
+branch for correctness. It found no defects in the time-zone and DST core. It
+did find seven real problems around that core, plus two weak tests. Each
+entry below is the finding and what changed.
+
+#### D11. Review: amounts are optional; a gridpoint failure never blocks an alert
+
+**Finding:** D7's "fail loudly" contradicted D9's "amounts never gate the
+alert." A gridpoint 500 or an unexpected unit aborted the whole run, so a 90%
+rain night sent *nothing*.
+
+**Decision:**
+- The hourly forecast alone decides whether to alert.
+- If the gridpoint fetch fails (HTTP error, timeout, bad JSON, empty body, no
+  `forecastGridData` URL) or its data can't be trusted (a series absent, a unit
+  other than mm, a malformed `validTime`), amounts become **unavailable**:
+  `NwsForecast.Amounts` is null and carries a reason. The run logs a warning
+  and the message says "Amounts unavailable from NWS."
+- A series that is *present but empty* is still genuine zero.
+- Points and hourly failures still fail the run (exit 2).
+- Real cancellation still propagates; only a timeout is treated as a gridpoint
+  failure.
+
+**Kind without amounts:** taken from the hits' forecast text. "freezing" or
+"ice" means Ice; "snow", "sleet", "flurr" or "wintry" means Snow; anything else
+means Rain. Priority is High only for Ice. This is the Block 1 keyword heuristic,
+kept as a fallback so the title isn't always "rain."
+
+**Rejected:** keeping D7's fail-loud behavior for the gridpoint. A flaky
+*secondary* endpoint would then suppress a real alert.
+
+**Tests:** `NwsClientTests` use a stub HTTP handler serving the captured
+fixtures:
+- gridpoint 500, bad JSON, null body and a missing grid URL each give no
+  amounts with a reason, while all 156 hours still map;
+- hourly 500 and points 500 still throw;
+- a cancelled token propagates.
+
+`NwsMappingTests` cover each unavailable cause, and empty-vs-absent series.
+`ForecastEvaluatorTests` cover the keyword table and its priorities. The timeout
+path is not yet tested; that comes in Block 5 with WireMock.
+
+#### D12. Review: one rounding rule for the decision and the text
+
+**Finding:**
+- Thresholds compared raw inches while the message rounded to 0.1". 0.09" snow
+  was kind Rain while the body printed `0.1" snow`.
+- 0.96" snow printed `1.0"` at default priority.
+- 0.001" of ice, printed as "trace," forced Ice and high priority, and hid 6"
+  of snow from the title.
+
+**Decision:**
+- Every threshold and every displayed number goes through
+  `PrecipRounding.Tenths` (0.1", midpoints away from zero), so the decision and
+  the text cannot disagree.
+- "trace" means raw > 0 but rounds to 0.0. A trace of ice is no longer Ice or
+  high priority.
+- When the kind is Ice and snow rounds to ≥ 1", the title names both:
+  `Overnight ice (0.2") + 6.0" snow, up to 80%`.
+
+**Rejected:** keeping separate display and decision precision, which is the
+mismatch the review found.
+
+**Tests:** boundary rows assert the assessment *and* the composed message
+together: 2.3 mm snow, 24.5 mm snow, 12.5 mm liquid, 0.001" ice and 0.05" ice.
+Both ice+snow title forms are covered.
+
+#### D13. Review: no data for part of the night is a failed run, never a dry one
+
+**Finding:** missing, stale or partial hourly data produced no hits, so the
+job logged "No notification sent" and exited 0. That's the silence-is-ambiguous
+problem from the brief, created by the decision engine itself.
+
+**Decision:** `Evaluate` checks that the hours cover the effective range
+`[max(start, now), end)` with no gaps. Overlaps and duplicates are fine. On the
+first gap it throws `IncompleteForecastException`, with the gap's instants, and
+the job exits with code **4**. A dry night is now only ever reported from a
+complete forecast. In Block 6, the heartbeat will see code 4 as a failed run.
+
+**Rejected:** warning but continuing. It still turns "no data" into "no rain"
+whenever the data is entirely missing.
+
+**Tests:**
+- mid-window gap, missing tail, empty hours, and data starting late, each with
+  exact gap instants;
+- unsorted, overlapping and duplicate hours pass;
+- a 2 AM run needs only 2–7 AM covered, and a 2:30 run is covered by the
+  2 AM hour;
+- both DST payloads pass.
+
+#### D14. Review: strict timestamps and a validated threshold
+
+**Timestamps:** a timestamp with no UTC offset (`2026-10-29T12:00:00`) was
+parsed in the *host's* zone. That passes on a New York dev box and is off by
+4 hours in a UTC container. `StrictTimestamps.Parse` now requires `Z` or
+`±hh:mm`/`±hhmm`. It applies to gridpoint `validTime` starts and, through a JSON
+converter, to hourly `startTime`/`endTime`. NWS sends offsets today, so this
+closes a latent bug rather than a live one. **Tests:** offset forms parse to the
+right instants; offset-less strings throw in both the parser and JSON.
+
+**Threshold:** `PRECIP_PROBABILITY_THRESHOLD=60%` silently became 50, and 150
+was accepted and never alerted. `AppConfig.ParseThreshold` now uses 50 when
+unset, accepts integers 0–100, and otherwise refuses to start with a message
+naming the variable, the same as the window check (D5). **Tests:**
+`AppConfigTests`.
+
+**Weak tests fixed:** the ASCII-header test only ever fed ASCII. It now
+includes a hit with `Pluie légère ❄`, and the title and tags stay ASCII. The
+kind and priority boundary tests now assert on the composed text as well
+(D12).

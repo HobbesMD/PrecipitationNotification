@@ -7,10 +7,17 @@ internal static class NwsMapper
 {
     private const string Millimetres = "wmoUnit:mm";
 
+    /// <summary>
+    /// Amounts are optional: if <paramref name="amountsUnavailableReason"/> is given, or the grid
+    /// data is missing, mis-united or malformed, the result carries null amounts and a reason
+    /// rather than throwing or guessing zero. A missing time zone still throws — nothing
+    /// downstream can place the overnight window without it.
+    /// </summary>
     public static NwsForecast ToForecast(
         PointProperties point,
         IReadOnlyList<ForecastPeriod> periods,
-        GridpointProperties? grid)
+        GridpointProperties? grid,
+        string? amountsUnavailableReason = null)
     {
         var zone = point.TimeZone
             ?? throw new InvalidOperationException("NWS /points response had no timeZone.");
@@ -23,26 +30,58 @@ internal static class NwsMapper
             p.Temperature,
             p.TemperatureUnit ?? "F")).ToList();
 
-        var amounts = new PrecipAmounts(
-            MapSeries(grid?.QuantitativePrecipitation, "quantitativePrecipitation"),
-            MapSeries(grid?.SnowfallAmount, "snowfallAmount"),
-            MapSeries(grid?.IceAccumulation, "iceAccumulation"));
+        if (amountsUnavailableReason is not null)
+            return new NwsForecast(zone, hours, null, amountsUnavailableReason);
 
-        return new NwsForecast(zone, hours, amounts);
+        var amounts = TryMapAmounts(grid, out var reason);
+        return new NwsForecast(zone, hours, amounts, reason);
     }
 
-    // Refuse to guess at units: PrecipAmounts is millimetres end to end.
-    private static IReadOnlyList<IntervalAmount> MapSeries(GridSeries? series, string name)
+    private static PrecipAmounts? TryMapAmounts(GridpointProperties? grid, out string? reason)
     {
+        if (grid is null)
+        {
+            reason = "gridpoint response had no properties";
+            return null;
+        }
+
+        var liquid = TryMapSeries(grid.QuantitativePrecipitation, "quantitativePrecipitation", out reason);
+        if (liquid is null) return null;
+        var snow = TryMapSeries(grid.SnowfallAmount, "snowfallAmount", out reason);
+        if (snow is null) return null;
+        var ice = TryMapSeries(grid.IceAccumulation, "iceAccumulation", out reason);
+        if (ice is null) return null;
+
+        return new PrecipAmounts(liquid, snow, ice);
+    }
+
+    // Refuse to guess at units: PrecipAmounts is millimetres end to end. An absent series is
+    // unavailable; a present series with no values is genuine "no data" and maps to empty.
+    private static List<IntervalAmount>? TryMapSeries(GridSeries? series, string name, out string? reason)
+    {
+        reason = null;
         if (series is null)
-            return [];
+        {
+            reason = $"gridpoint {name} series was absent";
+            return null;
+        }
 
         if (series.Uom != Millimetres)
-            throw new InvalidOperationException(
-                $"NWS gridpoint {name} uses unit '{series.Uom}', expected '{Millimetres}'.");
+        {
+            reason = $"gridpoint {name} uses unit '{series.Uom}', expected '{Millimetres}'";
+            return null;
+        }
 
-        return (series.Values ?? [])
-            .Select(v => PrecipAmounts.ParseValidTime(v.ValidTime, v.Value))
-            .ToList();
+        try
+        {
+            return (series.Values ?? [])
+                .Select(v => PrecipAmounts.ParseValidTime(v.ValidTime, v.Value))
+                .ToList();
+        }
+        catch (FormatException ex)
+        {
+            reason = $"gridpoint {name} had a malformed validTime: {ex.Message}";
+            return null;
+        }
     }
 }

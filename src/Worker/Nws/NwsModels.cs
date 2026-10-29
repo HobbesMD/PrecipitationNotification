@@ -1,4 +1,6 @@
+using System.Text.Json;
 using System.Text.Json.Serialization;
+using Worker.Forecast;
 
 namespace Worker.Nws;
 
@@ -21,8 +23,8 @@ internal sealed record HourlyForecastProperties(
 
 internal sealed record ForecastPeriod(
     [property: JsonPropertyName("number")] int Number,
-    [property: JsonPropertyName("startTime")] DateTimeOffset StartTime,
-    [property: JsonPropertyName("endTime")] DateTimeOffset EndTime,
+    [property: JsonPropertyName("startTime"), JsonConverter(typeof(StrictOffsetConverter))] DateTimeOffset StartTime,
+    [property: JsonPropertyName("endTime"), JsonConverter(typeof(StrictOffsetConverter))] DateTimeOffset EndTime,
     [property: JsonPropertyName("isDaytime")] bool IsDaytime,
     [property: JsonPropertyName("temperature")] int Temperature,
     [property: JsonPropertyName("temperatureUnit")] string? TemperatureUnit,
@@ -50,3 +52,25 @@ internal sealed record GridSeries(
 internal sealed record GridValue(
     [property: JsonPropertyName("validTime")] string ValidTime,
     [property: JsonPropertyName("value")] double? Value);
+
+/// <summary>
+/// Routes hourly timestamps through <see cref="StrictTimestamps"/> so an offset-less value fails
+/// deserialization like any other bad payload, instead of being read in the host's zone.
+/// </summary>
+internal sealed class StrictOffsetConverter : JsonConverter<DateTimeOffset>
+{
+    public override DateTimeOffset Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        try
+        {
+            return StrictTimestamps.Parse(reader.GetString() ?? "");
+        }
+        catch (FormatException ex)
+        {
+            throw new JsonException(ex.Message, ex);
+        }
+    }
+
+    public override void Write(Utf8JsonWriter writer, DateTimeOffset value, JsonSerializerOptions options) =>
+        writer.WriteStringValue(value);
+}

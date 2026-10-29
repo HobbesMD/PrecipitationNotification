@@ -45,10 +45,22 @@ public class PrecipAmountsTests
     [InlineData("not-a-date/PT1H")]                     // bad date
     [InlineData("2026-10-29T12:00:00+00:00/banana")]    // bad duration
     [InlineData("2026-10-29T12:00:00+00:00/")]          // empty duration
+    [InlineData("2026-10-29T12:00:00/PT1H")]            // no UTC offset
     [InlineData("2026-10-29T12:00:00+00:00/PT0H")]      // zero duration
     [InlineData("2026-10-29T12:00:00+00:00/-PT1H")]     // negative duration
     public void ParseValidTime_malformed_input_throws_FormatException(string validTime) =>
         Assert.Throws<FormatException>(() => PrecipAmounts.ParseValidTime(validTime, 1));
+
+    [Theory]
+    [InlineData("2026-10-29T12:00:00Z", "2026-10-29T12:00:00+00:00")]
+    [InlineData("2026-10-29T12:00:00+00:00", "2026-10-29T12:00:00+00:00")]
+    [InlineData("2026-10-29T12:00:00-04:00", "2026-10-29T16:00:00+00:00")]
+    [InlineData("2026-10-29T12:00:00-0400", "2026-10-29T16:00:00+00:00")]
+    public void ParseValidTime_offset_forms_parse_to_the_right_instant(string start, string expectedUtc)
+    {
+        var result = PrecipAmounts.ParseValidTime(start + "/PT1H", 0);
+        Assert.Equal(DateTimeOffset.Parse(expectedUtc), result.Start);
+    }
 
     // ---- Apportion (window [fromHour, toHour) measured from T0) ----
 

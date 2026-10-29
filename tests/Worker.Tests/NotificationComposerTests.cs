@@ -18,8 +18,9 @@ public class NotificationComposerTests
         PrecipKind kind = PrecipKind.Rain,
         double liquid = 0, double snow = 0, double ice = 0,
         AlertPriority priority = AlertPriority.Default,
-        IReadOnlyList<HourlyForecast>? hits = null) =>
-        new(OctWindow, hits ?? [Hour("2026-11-01T03:00:00-05:00")], 80, kind, liquid, snow, ice, priority);
+        IReadOnlyList<HourlyForecast>? hits = null,
+        bool amountsAvailable = true) =>
+        new(OctWindow, hits ?? [Hour("2026-11-01T03:00:00-05:00")], 80, kind, liquid, snow, ice, priority, amountsAvailable);
 
     [Fact]
     public void Rain_title_leads_with_kind_and_amount() =>
@@ -151,4 +152,74 @@ public class NotificationComposerTests
     [Fact]
     public void Empty_hits_throws() =>
         Assert.Throws<InvalidOperationException>(() => NotificationComposer.Compose(Night(hits: []), NewYork));
+
+    // ---- One rounding rule: every displayed number is Tenths(raw) ----
+
+    [Theory]
+    [InlineData(0.0906, "0.1\" snow")]
+    [InlineData(0.965, "1.0\" snow")]
+    [InlineData(2.14, "2.1\" snow")]
+    [InlineData(0.049, "trace snow")]
+    public void Body_amounts_are_rounded_to_tenths_and_trace_means_rounds_to_zero(double snow, string expected) =>
+        Assert.Equal(expected,
+            NotificationComposer.Compose(Night(PrecipKind.Snow, snow: snow), NewYork).Body.Split('\n')[1]);
+
+    [Fact]
+    public void Title_amount_uses_the_rounded_value() =>
+        Assert.Equal("Overnight snow: 1.0\" expected, up to 80%",
+            NotificationComposer.Compose(Night(PrecipKind.Snow, snow: 0.965), NewYork).Title);
+
+    // ---- Ice + snow: don't hide a snowstorm behind ice ----
+
+    [Fact]
+    public void Ice_with_a_snowstorm_names_both_and_drops_a_trace_ice_amount() =>
+        Assert.Equal("Overnight ice + 6.0\" snow, up to 80%",
+            NotificationComposer.Compose(Night(PrecipKind.Ice, snow: 6, ice: 0.01), NewYork).Title);
+
+    [Fact]
+    public void Ice_with_a_snowstorm_includes_the_ice_amount_when_displayable() =>
+        Assert.Equal("Overnight ice (0.2\") + 6.0\" snow, up to 80%",
+            NotificationComposer.Compose(Night(PrecipKind.Ice, snow: 6, ice: 0.2), NewYork).Title);
+
+    [Fact]
+    public void Ice_with_snow_under_an_inch_keeps_the_plain_ice_title() =>
+        Assert.Equal("Overnight ice: 0.2\" expected, up to 80%",
+            NotificationComposer.Compose(Night(PrecipKind.Ice, snow: 0.94, ice: 0.2), NewYork).Title);
+
+    [Fact]
+    public void Snow_kind_never_uses_the_combined_title() =>
+        Assert.Equal("Overnight snow: 6.0\" expected, up to 80%",
+            NotificationComposer.Compose(Night(PrecipKind.Snow, snow: 6), NewYork).Title);
+
+    // ---- Amounts unavailable ----
+
+    [Theory]
+    [InlineData("Rain", "Overnight rain: up to 80%")]
+    [InlineData("Snow", "Overnight snow: up to 80%")]
+    [InlineData("Ice", "Overnight ice: up to 80%")]
+    public void Unavailable_amounts_drop_the_amount_clause(string kindName, string title) =>
+        Assert.Equal(title,
+            NotificationComposer.Compose(Night(Enum.Parse<PrecipKind>(kindName), amountsAvailable: false), NewYork).Title);
+
+    [Fact]
+    public void Unavailable_amounts_replace_the_amounts_line()
+    {
+        var body = NotificationComposer.Compose(Night(PrecipKind.Snow, amountsAvailable: false), NewYork).Body.Split('\n');
+
+        Assert.Equal("Amounts unavailable from NWS", body[1]);
+        Assert.StartsWith("3 AM:", body[2]);
+    }
+
+    // ---- Non-ASCII forecast text ----
+
+    [Fact]
+    public void Non_ascii_forecast_text_stays_in_the_body_and_out_of_title_and_tags()
+    {
+        const string text = "Pluie l\u00e9g\u00e8re \u2744";
+        var msg = NotificationComposer.Compose(Night(hits: [Hour("2026-11-01T03:00:00-05:00", text: text)]), NewYork);
+
+        Assert.All(msg.Title, c => Assert.True(c <= 0x7F, $"non-ASCII char in title: U+{(int)c:X4}"));
+        Assert.All(msg.Tags, c => Assert.True(c <= 0x7F, $"non-ASCII char in tags: U+{(int)c:X4}"));
+        Assert.Contains(text, msg.Body);
+    }
 }

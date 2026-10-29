@@ -31,7 +31,7 @@ internal sealed record AppConfig(
             UserAgent: Require("PRECIP_USER_AGENT"),
             WindowStart: windowStart,
             WindowEnd: windowEnd,
-            ProbabilityThreshold: ParseInt("PRECIP_PROBABILITY_THRESHOLD", 50));
+            ProbabilityThreshold: ParseThreshold(Environment.GetEnvironmentVariable(ThresholdKey)));
     }
 
     /// <summary>
@@ -47,6 +47,25 @@ internal sealed record AppConfig(
                 $"must be later than PRECIP_WINDOW_END ({end:HH:mm}).");
     }
 
+    private const string ThresholdKey = "PRECIP_PROBABILITY_THRESHOLD";
+
+    /// <summary>
+    /// Unset or empty means 50. Anything set must be an integer in 0–100: a typo like <c>60%</c>
+    /// used to fall back to 50 silently, the worst failure for an alerter. 0 is valid (every hour
+    /// hits), which is handy for testing.
+    /// </summary>
+    internal static int ParseThreshold(string? raw)
+    {
+        if (string.IsNullOrEmpty(raw))
+            return 50;
+
+        if (!int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var value) || value is < 0 or > 100)
+            throw new InvalidOperationException(
+                $"{ThresholdKey} must be an integer from 0 to 100, but was '{raw}'.");
+
+        return value;
+    }
+
     /// <summary>NWS rejects coordinates with more than 4 decimal places.</summary>
     public string LatLon => FormattableString.Invariant($"{Lat:0.####},{Lon:0.####}");
 
@@ -60,12 +79,6 @@ internal sealed record AppConfig(
 
     private static double ParseDouble(string key) =>
         double.Parse(Require(key), CultureInfo.InvariantCulture);
-
-    private static int ParseInt(string key, int fallback) =>
-        int.TryParse(Optional(key, fallback.ToString(CultureInfo.InvariantCulture)),
-            NumberStyles.Integer, CultureInfo.InvariantCulture, out var v)
-            ? v
-            : fallback;
 
     private static TimeOnly ParseTime(string key, string fallback) =>
         TimeOnly.Parse(Optional(key, fallback), CultureInfo.InvariantCulture);
