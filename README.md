@@ -49,7 +49,10 @@ later block. Repaid rows stay, struck through, so the history is visible.
 | No persistence and no idempotency — every run that clears the threshold sends a notification. | Block 4 |
 | No tracing or metrics. | Block 6 |
 | Silence is ambiguous: "no precip" and "the job is dead" look identical. No heartbeat. | Block 6 |
-| Console app only — no container, no schedule, runs from a dev machine. | Blocks 3, 7 |
+| ~~Console app only — no container, no schedule, runs from a dev machine.~~ | ✅ Block 3 ([D18](#d18-runtime-image-chiseled--extra-proved-by---self-check), [D19](#d19-the-nightly-run-is-2300-utc)) |
+| Image build, push and deploy are manual (`docker push`, `deploy/azure/deploy.sh`). CI only tests and builds. *(New in Block 3.)* | Block 7 |
+| A lost ntfy response plus the job's one retry can send the same alert twice ([D20](#d20-one-retry-and-the-duplicate-it-can-cause)). *(New in Block 3.)* | Block 4 |
+| Actions are pinned to major tags, not commit SHAs. Low risk while CI holds no secrets ([D24](#d24-review-deploysh-fails-closed)). *(New in Block 3.)* | Block 7 |
 
 ## Decision log
 
@@ -719,8 +722,11 @@ settings.
 **Proof:**
 - `.dockerignore` keeps `.env` out of the image (D18).
 - After deploy, `az containerapp job show` lists the secret names, not their
-  values.
-- The app never prints the coordinates (D22).
+  values. Checked on the first deploy, 2026-10-29: three secrets, listed by
+  name only. The topic and coordinates are `secretRef`s with no plain value,
+  and the job has no registry credentials.
+- The app never prints the coordinates (D22). Checked in the first Azure run's
+  logs.
 
 ### Block 3: independent review
 
