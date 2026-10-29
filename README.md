@@ -648,3 +648,58 @@ forward. Each row asserts:
 - the exact window instants;
 - the run happens before the window starts.
 
+#### D20. One retry, and the duplicate it can cause
+
+**Decision:** one replica, a 300 s timeout, and `replicaRetryLimit = 1`. A
+non-zero exit (1–5) makes Azure retry once. If the retry also fails, the
+execution is marked Failed.
+
+**Rejected:**
+- **No retries:** one NWS hiccup loses the night's alert, and there's no
+  in-process retry until Polly in Block 5.
+- **More retries:** each one widens the duplicate window below for little gain.
+
+**The duplicate it can cause:** if ntfy accepts the message but the response
+is lost (a timeout or a reset connection), the app exits 3, Azure runs it
+again, and the phone gets the alert twice. Every other failure (config, NWS,
+incomplete forecast) happens before anything is sent, so retrying it is safe.
+This is accepted for now and logged as debt. Block 4's database-enforced
+`(locationId, forecastNightDate)` key turns the retry into a no-op.
+
+**Why non-zero exits matter:** a Failed execution is state Azure keeps. Block
+6's heartbeat will read it, and that's how "the job died" becomes
+distinguishable from "no rain."
+
+**Proof:** the retry is Azure's behavior, not code, so there's no unit test.
+The job definition after deploy (`az containerapp job show`) shows the
+settings.
+
+#### D21. Secrets live in the job, not in the image or the repo
+
+**Decision:**
+- The ntfy topic and the coordinates are Container Apps **job secrets**,
+  injected as env vars with `secretref:`. The coordinates count as secrets
+  because a forecast gridpoint pins a home to about 2.5 km.
+- The NWS User-Agent and the window are plain env vars.
+- The repo is private, so pulling the image from GHCR needs a classic PAT
+  with only `read:packages`. The CLI stores it as a job secret too.
+- `deploy/azure/deploy.sh` reads every value from the environment, never
+  echoes one, and never uses `set -x`.
+
+**Rejected:**
+- **Key Vault with a managed identity.** That's the right answer for many
+  secrets or several apps. For three values it adds a vault, an identity and
+  role assignments, and protects nothing more in this block.
+- **Plain env vars.** Anyone with Reader on the job could read them in its
+  definition.
+
+**Known risk:** the PAT expires after a year. Then Azure can't pull the image
+and the job stops running, with no alert to say so. Mitigations:
+- a calendar reminder to renew it;
+- Block 6's heartbeat, which notices a run that never happened;
+- making the repo and image public, which removes the PAT entirely.
+
+**Proof:**
+- `.dockerignore` keeps `.env` out of the image (D18).
+- After deploy, `az containerapp job show` lists the secret names, not their
+  values.
