@@ -197,3 +197,35 @@ negative durations throw `FormatException`.
 - the real fixture over the fall-back night. Every value in it is 0 mm, so a
   second case with every value set to 6 mm checks that the arithmetic yields
   12 mm.
+
+#### D7. NWS responses map onto provider-neutral types; surprises fail loudly
+
+**Decision:** `NwsMapper` translates NWS DTOs into `HourlyForecast` and
+`PrecipAmounts`. The decision engine never sees an NWS type, which is the seam
+Open-Meteo plugs into in Block 5. `NwsClient` fetches `/points`, then the hourly
+forecast and the raw gridpoint data concurrently (`Task.WhenAll`), because the
+two don't depend on each other.
+
+**Fail-loud choices:**
+- A gridpoint series whose unit isn't `wmoUnit:mm` throws. A silent m→mm
+  conversion would hide an API change, and a 1000× error in snowfall is worse
+  than a failed run.
+- A missing `timeZone` throws rather than defaulting to New York, because a
+  wrong zone means a wrong window and a wrong idempotency key.
+- A missing probability stays `null`. It isn't coerced to 0% here because "no
+  data" and "0%" are different facts. The evaluator decides what null means
+  (D9).
+
+**Rejected:** mapping inside the evaluator, or passing NWS DTOs through. Either
+would couple the decision engine to one provider's JSON shape.
+
+**Tests:** `NwsMappingTests` run against the captured payloads, with no live
+HTTP:
+- 156 hours, with the first and last start times checked;
+- both Nov 1 01:00 hours, at −04:00 and −05:00, each 1 h long and contiguous;
+- the zone id is `America/New_York`;
+- 13 entries in each amount series;
+- a null probability maps to null;
+- a non-mm unit throws.
+
+The HTTP path itself is untested until WireMock arrives in Block 5.
