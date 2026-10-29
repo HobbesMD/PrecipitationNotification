@@ -1,0 +1,21 @@
+{
+  "properties": {
+    "periods": [
+      { "number": 1,  "startTime": "2027-03-13T18:00:00-05:00", "endTime": "2027-03-13T19:00:00-05:00", "isDaytime": false, "temperature": 45, "temperatureUnit": "F", "probabilityOfPrecipitation": { "unitCode": "wmoUnit:percent", "value": 80 },  "shortForecast": "Rain Likely" },
+      { "number": 2,  "startTime": "2027-03-13T19:00:00-05:00", "endTime": "2027-03-13T20:00:00-05:00", "isDaytime": false, "temperature": 44, "temperatureUnit": "F", "probabilityOfPrecipitation": { "unitCode": "wmoUnit:percent", "value": 60 },  "shortForecast": "Rain Likely" },
+      { "number": 3,  "startTime": "2027-03-13T20:00:00-05:00", "endTime": "2027-03-13T21:00:00-05:00", "isDaytime": false, "temperature": 43, "temperatureUnit": "F", "probabilityOfPrecipitation": { "unitCode": "wmoUnit:percent", "value": 10 },  "shortForecast": "Mostly Cloudy" },
+      { "number": 4,  "startTime": "2027-03-13T21:00:00-05:00", "endTime": "2027-03-13T22:00:00-05:00", "isDaytime": false, "temperature": 42, "temperatureUnit": "F", "probabilityOfPrecipitation": { "unitCode": "wmoUnit:percent", "value": 49 },  "shortForecast": "Chance Light Rain" },
+      { "number": 5,  "startTime": "2027-03-13T22:00:00-05:00", "endTime": "2027-03-13T23:00:00-05:00", "isDaytime": false, "temperature": 41, "temperatureUnit": "F", "probabilityOfPrecipitation": { "unitCode": "wmoUnit:percent", "value": 50 },  "shortForecast": "Chance Light Rain" },
+      { "number": 6,  "startTime": "2027-03-13T23:00:00-05:00", "endTime": "2027-03-14T00:00:00-05:00", "isDaytime": false, "temperature": 41, "temperatureUnit": "F", "probabilityOfPrecipitation": { "unitCode": "wmoUnit:percent", "value": 30 },  "shortForecast": "Mostly Cloudy" },
+      { "number": 7,  "startTime": "2027-03-14T00:00:00-05:00", "endTime": "2027-03-14T01:00:00-05:00", "isDaytime": false, "temperature": 40, "temperatureUnit": "F", "probabilityOfPrecipitation": { "unitCode": "wmoUnit:percent", "value": 20 },  "shortForecast": "Mostly Cloudy" },
+      { "number": 8,  "startTime": "2027-03-14T01:00:00-05:00", "endTime": "2027-03-14T03:00:00-04:00", "isDaytime": false, "temperature": 40, "temperatureUnit": "F", "probabilityOfPrecipitation": { "unitCode": "wmoUnit:percent", "value": 70 },  "shortForecast": "Rain Likely" },
+      { "number": 9,  "startTime": "2027-03-14T03:00:00-04:00", "endTime": "2027-03-14T04:00:00-04:00", "isDaytime": false, "temperature": 40, "temperatureUnit": "F", "probabilityOfPrecipitation": { "unitCode": "wmoUnit:percent", "value": 55 },  "shortForecast": "Rain Likely" },
+      { "number": 10, "startTime": "2027-03-14T04:00:00-04:00", "endTime": "2027-03-14T05:00:00-04:00", "isDaytime": false, "temperature": 39, "temperatureUnit": "F", "probabilityOfPrecipitation": { "unitCode": "wmoUnit:percent", "value": 0 },   "shortForecast": "Mostly Cloudy" },
+      { "number": 11, "startTime": "2027-03-14T05:00:00-04:00", "endTime": "2027-03-14T06:00:00-04:00", "isDaytime": false, "temperature": 39, "temperatureUnit": "F", "probabilityOfPrecipitation": { "unitCode": "wmoUnit:percent", "value": 90 },  "shortForecast": "Rain" },
+      { "number": 12, "startTime": "2027-03-14T06:00:00-04:00", "endTime": "2027-03-14T07:00:00-04:00", "isDaytime": false, "temperature": 39, "temperatureUnit": "F", "probabilityOfPrecipitation": { "unitCode": "wmoUnit:percent", "value": 40 },  "shortForecast": "Chance Light Rain" },
+      { "number": 13, "startTime": "2027-03-14T07:00:00-04:00", "endTime": "2027-03-14T08:00:00-04:00", "isDaytime": true,  "temperature": 41, "temperatureUnit": "F", "probabilityOfPrecipitation": { "unitCode": "wmoUnit:percent", "value": 95 },  "shortForecast": "Rain" },
+      { "number": 14, "startTime": "2027-03-14T08:00:00-04:00", "endTime": "2027-03-14T09:00:00-04:00", "isDaytime": true,  "temperature": 43, "temperatureUnit": "F", "probabilityOfPrecipitation": { "unitCode": "wmoUnit:percent", "value": 100 }, "shortForecast": "Rain" },
+      { "number": 15, "startTime": "2027-03-14T09:00:00-04:00", "endTime": "2027-03-14T10:00:00-04:00", "isDaytime": true,  "temperature": 45, "temperatureUnit": "F", "probabilityOfPrecipitation": { "unitCode": "wmoUnit:percent", "value": 100 }, "shortForecast": "Rain" }
+    ]
+  }
+}

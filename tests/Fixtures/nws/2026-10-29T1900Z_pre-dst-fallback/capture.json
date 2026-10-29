@@ -1,0 +1,7 @@
+{
+  "capturedAtUtc": "2026-10-29T19:00:45Z",
+  "label": "pre-dst-fallback",
+  "latLon": "40.7128,-74.006",
+  "forecastHourly": "https://api.weather.gov/gridpoints/OKX/33,42/forecast/hourly",
+  "forecastGridData": "https://api.weather.gov/gridpoints/OKX/33,42"
+}
