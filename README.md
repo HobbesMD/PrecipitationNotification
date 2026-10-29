@@ -16,7 +16,14 @@ cp .env.example .env   # then fill in real values
 dotnet run --project src/Worker              # evaluate tonight, notify if needed
 dotnet run --project src/Worker -- --dry-run # print the message, don't send it
 dotnet test
+
+docker build -t precip .
+docker run --rm precip --self-check                # image has real time-zone data? (exit 0/5)
+docker run --rm --env-file .env precip --dry-run   # full pipeline in a UTC container
 ```
+
+Deployed as an Azure Container Apps Job on a nightly cron: see
+[deploy/azure/README.md](deploy/azure/README.md).
 
 Fetches the NWS hourly forecast and raw gridpoint amounts for the configured
 coordinates, works out the next unfinished overnight window (8 PM → 7 AM) in the
@@ -42,7 +49,10 @@ later block. Repaid rows stay, struck through, so the history is visible.
 | No persistence and no idempotency — every run that clears the threshold sends a notification. | Block 4 |
 | No tracing or metrics. | Block 6 |
 | Silence is ambiguous: "no precip" and "the job is dead" look identical. No heartbeat. | Block 6 |
-| Console app only — no container, no schedule, runs from a dev machine. | Blocks 3, 7 |
+| ~~Console app only — no container, no schedule, runs from a dev machine.~~ | ✅ Block 3 ([D18](#d18-runtime-image-chiseled--extra-proved-by---self-check), [D19](#d19-the-nightly-run-is-2300-utc)) |
+| Image build, push and deploy are manual (`docker push`, `deploy/azure/deploy.sh`). CI only tests and builds. *(New in Block 3.)* | Block 7 |
+| A lost ntfy response plus the job's one retry can send the same alert twice ([D20](#d20-one-retry-and-the-duplicate-it-can-cause)). *(New in Block 3.)* | Block 4 |
+| Actions are pinned to major tags, not commit SHAs. Low risk while CI holds no secrets ([D24](#d24-review-deploysh-fails-closed)). *(New in Block 3.)* | Block 7 |
 
 ## Decision log
 
@@ -521,3 +531,304 @@ verdict (D13).
 - a complete forecast has no gaps;
 - the message line appears in local time when there are gaps, and is absent
   without them.
+
+### Block 3: containerize + deploy
+
+#### D17. CI runs the tests under three host time zones
+
+**Decision:** every PR to `main`, and every push to it, runs build and test in
+GitHub Actions (`.github/workflows/ci.yml`). The `test` job runs three times,
+with the runner's `TZ` set to `UTC`, `America/New_York` and
+`Australia/Sydney`. A separate `image` job builds the container and runs
+`--self-check` (D18). Nothing is pushed anywhere.
+
+**Rejected:** a single test run. It passes in whatever zone the runner happens
+to be in, but the rule since D1 is that the *host's* zone must never matter.
+Production is a UTC container and the dev box is in New York, so a bug that
+reads the host zone can pass on one and fail on the other.
+
+**Why these three:**
+- **UTC** is production.
+- **New York** is the dev box. It's where a host-zone bug is easiest to miss,
+  because there the host zone and the location's zone agree.
+- **Sydney** is the far side: a positive offset with opposite-season DST.
+
+**What the mutation check showed:** I made "today" come from the host's zone
+(`now.LocalDateTime`) instead of the location's, then ran the suite in a Linux
+container under each zone:
+
+| Host `TZ` | Clean | Mutated |
+|---|---|---|
+| UTC | 230 pass | 1 fails |
+| America/New_York | 230 pass | 1 fails |
+| Australia/Sydney | 230 pass | **all pass** |
+
+The test that fails is D2's Sydney row ("08:00 local is still yesterday in
+UTC"). *(Reasoning corrected by [D23](#d23-review-corrections-to-d17-d19-and-d20).)*
+With a host-zone "today", `Resolve` only goes wrong in one of two cases:
+- the host's date is *behind* the location's after 7 AM local, which needs a
+  host more than 7 hours west of the location;
+- the host's date is *ahead* before 7 AM local, which needs a host more than
+  17 hours east.
+
+The suite's real locations are New York and Sydney, and neither is more than
+7 hours east of a Sydney host or more than 17 hours west of it. So the Sydney
+leg can't catch this bug *with these tests*. A Honolulu row would let it. The
+legs aren't redundant: one host zone can be blind to a bug that another
+catches. Production's leg, UTC, is one that catches it.
+
+**Limitation:** the matrix multiplies the existing tests; it doesn't add
+cases. Which bugs a leg can see depends on which zones the rows use.
+
+**Enforcement:** the repo is now public, so a ruleset on `main` ("main: CI
+must pass") requires all three `test` legs and `image` to pass before any
+merge. It also blocks force-pushes to `main` and deleting it, because the
+commit history is part of the story.
+
+#### D18. Runtime image: chiseled `-extra`, proved by `--self-check`
+
+**Decision:** a multi-stage `Dockerfile`. The .NET 10 SDK image publishes
+`src/Worker`, and the runtime image is
+`mcr.microsoft.com/dotnet/runtime:10.0-noble-chiseled-extra`.
+- **Chiseled** means distroless: no shell, no package manager, and it runs as
+  the non-root user `app` (UID 1654).
+- **`-extra`** adds tzdata and ICU.
+
+A new flag, `--self-check`, looks up `America/New_York` and checks that its
+offset is −4 h on 2026-07-01 and −5 h on 2026-01-15. It needs no network and
+no config, and it exits 0, or **5** on failure. CI runs it against every image
+it builds.
+
+**Rejected:**
+- **Plain chiseled.** It has no tzdata, so `FindSystemTimeZoneById` throws and
+  every night exits 2. That's the trap D1 warned about.
+- **The full `runtime:10.0` image.** It works, but it's bigger and ships a
+  shell and package manager that a nightly job never uses.
+- **A live `--dry-run` in CI.** That proves more, but it calls NWS, so an NWS
+  outage would fail PRs for reasons unrelated to the change.
+
+**Why check offsets, not just the lookup:** a lookup can succeed against a
+zone with no rules, which would report a fixed offset all year. Checking a
+summer *and* a winter offset proves the DST rules are actually there.
+
+**Mutation check:** on plain `-noble-chiseled` the self-check prints
+`FAIL America/New_York: The time zone ID 'America/New_York' was not found on
+the local computer.` and exits 5. Back on `-extra`, it exits 0.
+
+**Also:**
+- `.dockerignore` keeps `.env` (secrets), `.git`, tests and tools out of the
+  build context. The exported image filesystem contains no `.env`, and `/app`
+  holds only the four published files.
+- `.gitattributes` forces LF on `*.sh` and the `Dockerfile`. A Windows
+  checkout with `core.autocrlf` was turning `tools/capture-nws.sh` into CRLF,
+  which bash can't run.
+
+**Tests:**
+- `RuntimeSelfCheckTests` proves the check passes on the dev host.
+- CI's `image` job proves it passes in the real runtime image.
+
+#### D19. The nightly run is 23:00 UTC
+
+**Decision:** cron `0 23 * * *`. Container Apps cron schedules are always UTC,
+with no time-zone setting, so the local run time moves with DST: 7 PM EDT in
+summer, 6 PM EST in winter. Both are before the 8 PM window opens. The alert
+always arrives before the night starts, on a forecast at most an hour or two
+older than it could be.
+
+**Rejected:**
+- **One cron per DST season**, e.g. 00:00 UTC in summer and 01:00 UTC in
+  winter to land on exactly 8 PM. That means editing the schedule twice a
+  year, or having the app skip whichever run is in the wrong season. Both are
+  brittle.
+- **Running hourly and letting the app decide it's evening.** That's correct,
+  but every extra run is another chance at a duplicate alert, and duplicates
+  aren't prevented until Block 4's idempotency key.
+
+**What would break it** *(corrected by [D23](#d23-review-corrections-to-d17-d19-and-d20))*:
+a location where 23:00 UTC isn't early evening.
+- **UTC−3 through UTC+7:** 23:00 UTC falls inside the window (London gets it
+  at 11 PM or midnight). The evaluator still does the right thing, because D9
+  only looks at hours still ahead, but the alert arrives after the night has
+  started.
+- **UTC+8 and further east:** 23:00 UTC is already the next morning (9 AM in
+  Guam, which NWS serves). `Resolve` picks the coming night, so the alert
+  arrives about 11 hours early, on a forecast that old.
+
+Per-location schedules belong with Block 4's Locations table.
+
+**In production:** the first scheduled execution started at
+2026-10-29 23:00:00Z (7 PM EDT) and succeeded in 38 s:
+- night `2026-10-29`, window `00:00Z → 11:00Z`;
+- 11 hours checked, no hits;
+- no notification sent.
+
+An earlier manual run with the threshold forced to 0 did reach the phone,
+which proves the Azure → ntfy path.
+
+**Tests:** `NightWindowTests.Utc_cron_run_precedes_that_evenings_window_in_New_York`
+runs at 23:00Z on six days: an ordinary summer day, an ordinary winter day, the
+day before and the day of fall-back, and the day before and the day of spring
+forward. Each row asserts:
+- the night date is that same local date;
+- the exact window instants;
+- the run happens before the window starts.
+
+#### D20. One retry, and the duplicate it can cause
+
+**Decision:** one replica, a 300 s timeout, and `replicaRetryLimit = 1`. Any
+non-zero exit makes Azure retry once. That means 1–5 from the app, but also a
+crash (an unhandled exception exits 134) or the timeout killing the replica.
+If the retry also fails, the execution is marked Failed.
+
+**Rejected:**
+- **No retries:** one NWS hiccup loses the night's alert, and there's no
+  in-process retry until Polly in Block 5.
+- **More retries:** each one widens the duplicate window below for little gain.
+
+**The duplicate it can cause:** if ntfy accepts the message but the response
+is lost (a timeout or a reset connection), the app exits 3, Azure runs it
+again, and the phone gets the alert twice. Every other failure (config, NWS,
+incomplete forecast, a crash) happens before anything is sent, so retrying it
+is safe. After a successful publish, the only code left is one `WriteLine`
+and `return 0`. The 300 s timeout can't cut a publish short either: three
+30 s HTTP timeouts cap the run's network time at about 90 s.
+This is accepted for now and logged as debt. Block 4's database-enforced
+`(locationId, forecastNightDate)` key turns the retry into a no-op.
+
+**Why non-zero exits matter:** a Failed execution is state Azure keeps. Block
+6's heartbeat will read it, and that's how "the job died" becomes
+distinguishable from "no rain."
+
+**Proof:** the retry is Azure's behavior, not code, so there's no unit test.
+The job definition after deploy (`az containerapp job show`) shows the
+settings.
+
+#### D21. Secrets live in the job, not in the image, the repo or the logs
+
+*(Revised by [D22](#d22-review-the-coordinates-were-in-the-logs-every-night): the logs part, and the public repo.)*
+
+**Decision:**
+- The ntfy topic and the coordinates are Container Apps **job secrets**,
+  injected as env vars with `secretref:`. The coordinates count as secrets
+  because four decimal places pin a house to about 11 m.
+- The NWS User-Agent and the window are plain env vars.
+- The repo and its GHCR image are **public**, so Azure pulls the image with
+  no registry credentials. Going public was the plan from the start; it also
+  removes a GitHub PAT that would have expired after a year and silently
+  stopped the job.
+- `deploy/azure/deploy.sh` reads every value from the environment, never
+  echoes one, and never uses `set -x`. Its README loads the values from the
+  gitignored `.env` in a subshell, rather than having you type
+  `export NAME=value` into shell history.
+
+**Rejected:**
+- **Key Vault with a managed identity.** That's the right answer for many
+  secrets or several apps. For three values it adds a vault, an identity and
+  role assignments, and protects nothing more in this block.
+- **Plain env vars.** Anyone with Reader on the job could read them in its
+  definition.
+- **A private image and a PAT.** It hides nothing (the code is public anyway)
+  and adds an expiring credential.
+
+**Proof:**
+- `.dockerignore` keeps `.env` out of the image (D18).
+- After deploy, `az containerapp job show` lists the secret names, not their
+  values. Checked on the first deploy, 2026-10-29: three secrets, listed by
+  name only. The topic and coordinates are `secretRef`s with no plain value,
+  and the job has no registry credentials.
+- The app never prints the coordinates (D22). Checked in the first Azure run's
+  logs.
+
+### Block 3: independent review
+
+After D17–D21, a separate reviewer that wrote none of the code checked the
+branch. It confirmed the D19 instants, that .NET on Linux honors `TZ`, that a
+failing test fails the CI job under the MTP runner, the D20 duplicate argument,
+and that re-running `deploy.sh` keeps existing secrets. It found two real
+problems and several smaller ones.
+
+#### D22. Review: the coordinates were in the logs every night
+
+**Finding:** D21 made the coordinates a job secret, but the app printed them
+on every run (`Fetching NWS forecast for <lat>,<lon>`). In Azure, stdout
+goes to the Log Analytics workspace. So the exact location was copied there
+nightly, readable by anyone who can query the workspace. A malformed coordinate
+leaked too, because `double.Parse`'s error message includes the input, and
+config errors are printed. The secret only protected the job definition.
+
+**Decision:**
+- The coordinates are never written to stdout or stderr. The fetch log line no
+  longer includes them.
+- `AppConfig.ParseCoordinate` names the variable in its error but never the
+  value, unlike the threshold error (D14), which echoes the value because it
+  isn't secret.
+- It also stopped accepting thousands separators. `12,3456` (a European
+  decimal comma) used to parse silently as `123456`.
+
+Nothing else leaks: `HttpRequestException` messages don't include the
+`/points/{lat},{lon}` URL, and the gridpoint failure reasons don't either.
+
+**Rejected:** rounding the coordinates in the log. Any precision useful for
+debugging is precise enough to locate a house, and the time zone that's
+already logged covers what debugging needs.
+
+**What would break it:** any new log line that prints `config` or the points
+URL. Block 6's structured logging must keep coordinates out of its fields.
+
+**Tests:** `AppConfigTests`:
+- a valid coordinate parses exactly;
+- `12.3456x` and `12,3456` are rejected with the variable named and `3456`
+  absent from the message;
+- missing and empty values are rejected, naming the variable.
+
+#### D23. Review: corrections to D17, D19 and D20
+
+**Corrections:**
+- **D17** said a host-zone "today" bug needs a host 7 hours west of the
+  location. That was half the story: a host more than 17 hours *east* also
+  triggers it. So the Sydney leg's blindness comes from the suite having no
+  far-west location (like Honolulu), not from Sydney itself.
+- **D19** said 23:00 UTC is late everywhere at UTC−3 and further east. From
+  UTC+8 east it's actually the next *morning*, so the alert comes about 11
+  hours early.
+- **D20** said "exit 1–5". Any non-zero exit retries, including a crash
+  (exit 134) and the replica timeout. All of them happen before the send, so
+  the duplicate argument stands.
+
+The entries above are corrected in place, each marked.
+
+#### D24. Review: `deploy.sh` fails closed
+
+**Findings and fixes:**
+- **"Doesn't exist" vs "broken."** `az ... show` failing for *any* reason
+  (an expired login, throttling, an unregistered provider) sent the script
+  down the create path and hid the real error. It now creates only when az
+  says not-found, and otherwise stops with az's message. It also checks up
+  front that the `Microsoft.App` and `Microsoft.OperationalInsights`
+  providers are registered. This subscription's weren't, which is how the
+  reviewer found the problem.
+- **Tags.** It rejected only `:latest`, so `:main` passed, and a mutable tag
+  breaks "every run maps to a commit." It now accepts only a 7–40 character
+  hex tag or an `@sha256:` digest.
+- **Stale credentials.** On an existing job with no PAT set, it now removes
+  any old `ghcr.io` registry entry. GHCR rejects a pull with a bad PAT even
+  for a public image, so a stale one would break the job when it expired.
+- **Small fixes:**
+  - the script is now executable (`100755`);
+  - `.dockerignore` excludes `.env` at any depth (`**/.env`), not just at the
+    root.
+
+**Proof:** stub runs with a fake `az` on `PATH`:
+- `:main`, `:latest` and an untagged registry-port image are rejected; a sha
+  tag and a digest pass.
+- An unregistered provider stops the script with the fix command.
+- Not-found takes the create path; a "not registered" show error stops the
+  script without creating anything.
+- A public image with an old `ghcr.io` entry triggers `registry remove`.
+
+A probe build with `.env` files at the root and in `src/Worker/` copied only
+the `.env.example` files.
+
+**Not changed:** actions are pinned to major version tags rather than commit
+SHAs. The workflow uses no secrets and a read-only token, so a compromised
+action has little to steal. Revisit in Block 7, when CI gets push credentials.

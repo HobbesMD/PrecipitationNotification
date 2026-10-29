@@ -1,0 +1,18 @@
+# .env holds secrets (ntfy topic, contact info) and must never enter an image layer.
+# **/ so a .env anywhere in the tree is excluded, not just at the root.
+**/.env
+**/.env.*
+!**/.env.example
+
+**/bin
+**/obj
+.git
+.github
+.claude
+.vs
+.vscode
+.idea
+tests
+tools
+deploy
+*.md
