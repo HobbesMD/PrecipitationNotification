@@ -68,6 +68,38 @@ public sealed class AppConfigTests : IDisposable
     }
 
     [Fact]
+    public void Connection_string_alone_is_enough_for_migrate()
+    {
+        // --migrate needs the database and nothing else.
+        Environment.SetEnvironmentVariable("PRECIP_NTFY_TOPIC", null);
+        Environment.SetEnvironmentVariable("PRECIP_USER_AGENT", null);
+
+        Assert.Equal("Host=localhost;Database=precip_test", AppConfig.ConnectionStringFromEnvironment());
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    public void Connection_string_alone_is_rejected_when_missing_naming_the_variable(string? raw)
+    {
+        Environment.SetEnvironmentVariable(AppConfig.ConnectionStringKey, raw);
+
+        var ex = Assert.Throws<InvalidOperationException>(AppConfig.ConnectionStringFromEnvironment);
+        Assert.Contains(AppConfig.ConnectionStringKey, ex.Message);
+    }
+
+    [Fact]
+    public void Error_messages_never_echo_the_other_secrets()
+    {
+        Environment.SetEnvironmentVariable("PRECIP_USER_AGENT", null);
+
+        var ex = Assert.Throws<InvalidOperationException>(AppConfig.FromEnvironment);
+
+        Assert.DoesNotContain("test-topic-not-secret", ex.Message);
+        Assert.DoesNotContain("precip_test", ex.Message);
+    }
+
+    [Fact]
     public void ToString_redacts_the_topic_and_connection_string()
     {
         // A record's generated ToString prints every property, so one stray log of

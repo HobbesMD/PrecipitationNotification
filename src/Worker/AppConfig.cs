@@ -27,6 +27,12 @@ internal sealed record AppConfig(
             ConnectionString: Require(ConnectionStringKey));
 
     /// <summary>
+    /// Just the connection string, for <c>--migrate</c>: applying the schema needs neither the
+    /// topic nor the user agent, and a migration job should not have to be given them.
+    /// </summary>
+    public static string ConnectionStringFromEnvironment() => Require(ConnectionStringKey);
+
+    /// <summary>
     /// The generated record ToString prints every property; one stray log of the
     /// config would leak the topic and the database password. Print only what's safe.
     /// </summary>

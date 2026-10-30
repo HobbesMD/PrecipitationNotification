@@ -996,6 +996,71 @@ the unique index. The ledger (D25) depends on its name.
   (`CREATE DATABASE … TEMPLATE`). So every DB test also proves the migrations
   build the schema.
 
+#### D27. The gridpoint and time zone are cached on the location row
+
+**Decision:** `NwsClient` now has two steps. `ResolvePointAsync` calls
+`/points` and returns an `NwsPoint`: the zone, the hourly URL and the grid URL.
+`GetForecastAsync(NwsPoint)` fetches the forecast. `DbGridpointCache` stores the
+point on the `locations` row (`time_zone_id`, `forecast_hourly_url`,
+`forecast_grid_data_url`, `gridpoint_resolved_at`) and reuses it on every
+later run. That repays the Block 1 debt of re-fetching `/points` every night.
+
+**Invalidation:** the cache never expires on a timer. A **404** from the cached
+hourly URL throws `NwsPointStaleException`. The pass then refreshes the point
+once and retries the fetch once. If it is still stale, the location fails with
+exit 2, so it can't loop. A 500 is a plain NWS error, not "stale," because an
+outage must not churn the cache.
+
+**Rejected:**
+- **A time-to-live (TTL) cache.** It re-fetches a mapping that almost never
+  changes, and it still serves a stale URL for up to a whole TTL after NWS
+  moves it.
+- **Caching in memory.** The job runs once and exits, so nothing would survive
+  to the next night.
+
+**Why the row is the right place:** the zone is half of what makes the
+idempotency key (D2/D25), and D10 said it belongs to the location. Coordinates
+are immutable (D26), so the cached point can't drift from them.
+
+**Tests:**
+- `DbGridpointCacheTests`:
+  - the first `GetAsync` calls `/points` once and persists the columns;
+  - a second `GetAsync`, with a fresh context, makes 0 `/points` calls;
+  - `RefreshAsync` overwrites a stale URL;
+  - an hourly 404 throws stale; a 500 does not.
+- `NightlyPassTests`: `Stale_point_is_refreshed_exactly_once_and_the_fetch_retried_once`,
+  and `Still_stale_after_one_refresh_fails_the_location_with_2_and_does_not_loop`.
+- `NwsCoordinatesTests` formats with at most 4 decimals in any culture.
+
+#### D28. Migrations are explicit; a run refuses an out-of-date schema
+
+**Decision:** schema changes are applied only by `Worker --migrate`, run on
+purpose from the dev box before a deploy. Every normal run first checks that
+the database is reachable and that `GetPendingMigrationsAsync()` is empty. If
+either check fails, it exits **6** ("database not ready") before touching
+anything else.
+
+**Rejected:** migrating on startup (`Database.Migrate()` in every run). It's
+convenient, but:
+- the nightly job would need DDL rights it otherwise never uses;
+- a bad migration would run unattended at 23:00 and cost that night's alert;
+- two overlapping starts would race to migrate.
+
+**Why exit 6 and not a crash:** "the schema is behind" is an operator mistake,
+not a bug. A distinct code makes the Failed execution self-explanatory, and
+Block 6's heartbeat will see it.
+
+**What would break it:** deploying an image without running `--migrate` first.
+That's caught on the first run (exit 6), not silently ignored.
+`deploy/azure/README.md` puts the migrate step before `deploy.sh`.
+
+**Tests:**
+- `MigratorTests`: an empty DB gets every migration, a re-run is a no-op, and
+  an unreachable DB exits 6 without printing the password.
+- `NightlyPassTests`: `Pending_migrations_return_6_before_anything_else_is_touched`,
+  `Database_with_no_schema_at_all_returns_6`, and
+  `Unreachable_database_returns_6_without_echoing_the_connection_string`.
+
 #### D30. The admin API is local-only, behind an API key
 
 **Decision:** `src/Api` is a minimal API for managing locations and their
@@ -1046,3 +1111,58 @@ Deploying it publicly is debt for Block 7.
 - `Duplicate_name_is_409` and `No_endpoint_changes_coordinates`;
 - `Alerts_default_to_50_and_cap_at_500`;
 - startup refused for a missing, empty or 31-character key.
+
+#### D31. The Worker runs on the generic host: `--once` in Azure, a loop locally
+
+**Decision:** `Program.cs` builds a `Host.CreateApplicationBuilder` host, and
+one `NightlyPass` does the work in both modes:
+- **`--once`** (the deployed Container Apps Job): run one pass, return its exit
+  code, stop.
+- **No flag** (local): a `BackgroundService` runs a pass at start, then every
+  `Worker:Interval` (default 1 h). It uses a `PeriodicTimer` on the injected
+  `TimeProvider`, so tests drive it with a fake clock.
+- **`--self-check`** is still the very first statement, before config or the
+  host, because CI runs it in an image with nothing set (D18).
+
+**Why hourly is now fine:** D19 rejected an hourly schedule because every extra
+run was another chance at a duplicate alert. D25 removes that objection. The
+first run that sees precipitation alerts; every later run that night is a
+no-op. Production stays on the 23:00 UTC cron, because one run a night is all
+it needs.
+
+**Rejected:**
+- **Keeping top-level statements and constructing a `DbContext` by hand.**
+  That's a smaller diff, but every dependency would be wired by hand twice
+  (app and tests). It also isn't how a `BackgroundService` is built, which is
+  what this design note exists to show.
+- **Deferring the long-running mode.** Both modes share the pass, so the loop
+  costs one small class.
+
+**Many locations:**
+- Each active location runs inside its own try/catch, in id order.
+- The run exits with the **first failing location's code** (2 NWS, 3 ntfy, 4
+  incomplete), and every failure is logged.
+- **No active locations is exit 1**, never a quiet 0. Silence must not mean
+  "unconfigured" (problem 3 from the brief).
+- Azure's one retry (D20) re-runs every location. That's safe: sent nights are
+  no-ops, and dry ones are just re-evaluated.
+
+**Logging (D22, extended):**
+- Locations are identified by id and name only.
+- The framework's `System.Net.Http.HttpClient` logger is switched off. At
+  Information level it logs every request's full URL, and that URL contains
+  the coordinates (`/points/{lat},{lon}`) and the ntfy topic. The integration
+  agent found this; removing the filter makes two `WorkerServicesTests` fail.
+
+**Tests:**
+- `NightlyPassTests` (25):
+  - every exit code;
+  - `Failing_first_location_does_not_stop_the_second_and_its_code_is_returned`;
+  - `Already_sent_night_makes_no_forecast_call_and_counts_as_ok`;
+  - `Dry_run_never_touches_the_ledger_and_prints_the_message`;
+  - `D22_no_log_line_contains_the_coordinates_or_the_topic`, a full pass over
+    six locations taking different paths, with a real `NtfyPublisher`.
+- `PassHostedServiceTests`: `--once` stops with the pass's code, and the loop
+  runs again after one fake interval and survives a crashing pass.
+- `WorkerServicesTests`: the URLs never appear in the logs, and the headers are
+  sent.
