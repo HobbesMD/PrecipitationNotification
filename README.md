@@ -1350,6 +1350,8 @@ What it confirmed, with evidence:
 
 Each test asserts how many requests actually reached the server. The suite passed three consecutive full runs before commit.
 
+**Logging:** the `Polly` log category is set to Warning. Polly logs every successful attempt at Information, which would have doubled each run's log volume; retries, timeouts and breaker transitions are Warning and stay. The local end-to-end run caught this.
+
 #### D34. ntfy is retried only when the request provably never arrived
 
 **Decision:** `AddNtfyResilience` retries the publish POST **only** for failures where ntfy cannot have processed it:
@@ -1431,6 +1433,8 @@ Each test asserts how many requests actually reached the server. The suite passe
 - `Our_own_cancellation_is_not_a_provider_failure_and_propagates`
 
 The D22 log guard now includes a fallback location whose errors quote a URL carrying the coordinates and topic. Nothing leaks.
+
+**Drills:** `Nws:BaseUrl` and `OpenMeteo:BaseUrl` are configurable (absolute http(s) URLs, else startup fails with exit 1), so an outage can be forced without code changes. One catch, found in the local end-to-end run: `Nws:BaseUrl` only redirects the `/points` lookup. The hourly URL cached on the location row (D27) is absolute, so a real drill also clears `forecast_hourly_url`. Done that way, locally on 2026-10-30, NWS was refused, Open-Meteo answered with the same night key (cached zone, night `2026-10-30`), one notification arrived with the Source line, and `alert_history.provider` read `Open-Meteo`.
 
 #### D37. A pass deadline that actually fits inside Azure's timeout: 100 s, exit 7
 

@@ -47,7 +47,10 @@ internal static class WorkerServices
         // commands still log at Error.
         services.AddLogging(logging => logging
             .AddFilter("System.Net.Http.HttpClient", LogLevel.None)
-            .AddFilter("Microsoft.EntityFrameworkCore.Database.Command", LogLevel.Warning));
+            .AddFilter("Microsoft.EntityFrameworkCore.Database.Command", LogLevel.Warning)
+            // Polly logs every successful attempt at Information ("Execution attempt ... Result: 200").
+            // Retries, timeouts and breaker transitions are Warning or above, and those are the ones worth keeping.
+            .AddFilter("Polly", LogLevel.Warning));
 
         services.AddDbContext<PrecipDbContext>((_, options) =>
         {
@@ -57,7 +60,7 @@ internal static class WorkerServices
             options.EnableSensitiveDataLogging(false);
         });
 
-        services.AddSingleton(new NwsOptions());
+        services.AddSingleton(new NwsOptions(BaseUrl(configuration, "Nws:BaseUrl", new NwsOptions().BaseUrl)));
         // No HttpClient.Timeout on any of these: the resilience pipelines own the timeouts (the
         // client's own default of 100 s would otherwise cut across a retry in flight).
         services.AddHttpClient<NwsClient>(http =>
@@ -67,7 +70,7 @@ internal static class WorkerServices
             http.DefaultRequestHeaders.Accept.ParseAdd("application/geo+json");
         }).AddGetResilience(nws);
 
-        services.AddSingleton(new OpenMeteoOptions());
+        services.AddSingleton(new OpenMeteoOptions(BaseUrl(configuration, "OpenMeteo:BaseUrl", new OpenMeteoOptions().BaseUrl)));
         services.AddHttpClient<OpenMeteoClient>().AddGetResilience(openMeteo);
         services.AddScoped<IFallbackForecastSource, OpenMeteoForecastSource>();
 
@@ -94,6 +97,22 @@ internal static class WorkerServices
         var settings = new ResilienceSettings();
         configuration?.GetSection(path).Bind(settings);
         return settings;
+    }
+
+    /// <summary>
+    /// A provider base URL from config (<c>Nws:BaseUrl</c>, <c>OpenMeteo:BaseUrl</c>), else the real
+    /// one. Exists so a test or a drill can point a provider at a fake or dead host (forcing the
+    /// D36 fallback) without code changes. Must be an absolute http(s) URL; a trailing slash is
+    /// added because the clients append relative paths.
+    /// </summary>
+    private static string BaseUrl(IConfiguration? configuration, string key, string fallback)
+    {
+        var raw = configuration?[key];
+        if (string.IsNullOrWhiteSpace(raw))
+            return fallback;
+        if (!Uri.TryCreate(raw, UriKind.Absolute, out var uri) || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+            throw new InvalidOperationException($"{key} must be an absolute http(s) URL.");
+        return raw.EndsWith('/') ? raw : raw + "/";
     }
 
     private static TimeSpan ReadDeadline(IConfiguration? configuration)

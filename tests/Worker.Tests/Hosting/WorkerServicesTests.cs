@@ -148,6 +148,20 @@ public sealed class WorkerServicesTests
     }
 
     [Fact]
+    public async Task Provider_base_urls_come_from_config_with_a_trailing_slash_and_default_to_the_real_ones()
+    {
+        await using (var provider = NewServices(new LogCapture(), configuration: ConfigOf(
+            ("Nws:BaseUrl", "http://127.0.0.1:9"))).BuildServiceProvider())
+        {
+            Assert.Equal("http://127.0.0.1:9/", provider.GetRequiredService<NwsOptions>().BaseUrl);
+            Assert.Equal(new OpenMeteoOptions().BaseUrl, provider.GetRequiredService<OpenMeteoOptions>().BaseUrl);
+        }
+
+        Assert.Throws<InvalidOperationException>(() =>
+            NewServices(new LogCapture(), configuration: ConfigOf(("OpenMeteo:BaseUrl", "not a url"))));
+    }
+
+    [Fact]
     public void The_generic_hosts_own_configuration_is_found_without_being_passed_in()
     {
         var builder = Host.CreateApplicationBuilder(new HostApplicationBuilderSettings { DisableDefaults = true });
