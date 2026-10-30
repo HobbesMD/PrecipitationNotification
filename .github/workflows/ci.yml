@@ -51,6 +51,11 @@ jobs:
 
       - run: dotnet build -c Release --no-restore
 
+      # Runs every test project in the solution: Worker.Tests and Api.Tests. The
+      # database tests start real Postgres 17 through Testcontainers, which uses the
+      # Docker daemon already on ubuntu-latest; no service container is declared, so
+      # each test assembly (and each TZ leg) gets its own throwaway database.
+      #
       # global.json selects the Microsoft.Testing.Platform runner, so these are
       # MTP options (not VSTest's --logger trx flags).
       - run: dotnet test -c Release --no-build --results-directory TestResults --report-xunit-trx

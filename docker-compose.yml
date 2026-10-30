@@ -1,0 +1,29 @@
+# Local development database only. Production is Neon (see deploy/azure/README.md).
+#
+#   docker compose up -d
+#
+# The password below is DEV-ONLY: the port is published on 127.0.0.1 only. Never
+# reuse it anywhere else. A location row here still holds real coordinates, so
+# the database is not world-readable either. Production credentials come from the
+# environment and are never committed.
+services:
+  postgres:
+    # Same major version as the Testcontainers fixture (tests/Shared/PostgresFixture.cs).
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: dev-only-password
+      POSTGRES_DB: precip
+    ports:
+      # 127.0.0.1 only: a bare "5432:5432" binds every interface (0.0.0.0 and [::]).
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - precip-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d precip"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  precip-pgdata:

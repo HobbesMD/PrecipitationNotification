@@ -10,7 +10,7 @@ public class ForecastEvaluatorTests
     private const double MmPerInch = 25.4;
 
     private static readonly TimeZoneInfo NewYork = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
-    private static readonly PointProperties Point = new(null, "America/New_York", null);
+    private static readonly NwsPoint Point = new("America/New_York", "https://example.test/hourly", null);
 
     // Ordinary summer night, EDT: 2026-07-15 20:00 -04:00 -> 2026-07-16 07:00 -04:00 = 00:00Z -> 11:00Z.
     private static readonly NightWindow Summer = Window("2026-07-15T17:00:00-04:00");

@@ -13,23 +13,32 @@ that prove it.
 
 ```
 cp .env.example .env   # then fill in real values
-dotnet run --project src/Worker              # evaluate tonight, notify if needed
-dotnet run --project src/Worker -- --dry-run # print the message, don't send it
-dotnet test
+docker compose up -d                                     # local Postgres 17
+dotnet run --project src/Worker -- --migrate             # apply EF migrations (never automatic)
+dotnet run --project src/Api                             # admin API: POST /locations (X-Api-Key)
+dotnet run --project src/Worker -- --once                # one pass over every active location
+dotnet run --project src/Worker -- --once --dry-run      # print the message, don't send or record it
+dotnet run --project src/Worker                          # long-running: a pass now, then every Worker__Interval
+dotnet test                                              # DB tests need Docker (Testcontainers)
 
 docker build -t precip .
 docker run --rm precip --self-check                # image has real time-zone data? (exit 0/5)
-docker run --rm --env-file .env precip --dry-run   # full pipeline in a UTC container
+docker run --rm --env-file .env precip --once --dry-run   # full pipeline in a UTC container
+                                                          # (ConnectionStrings__Precip must reach the DB
+                                                          #  from inside the container, e.g. host.docker.internal)
 ```
 
 Deployed as an Azure Container Apps Job on a nightly cron: see
 [deploy/azure/README.md](deploy/azure/README.md).
 
-Fetches the NWS hourly forecast and raw gridpoint amounts for the configured
-coordinates, works out the next unfinished overnight window (8 PM → 7 AM) in the
-location's own time zone, and publishes one ntfy message if any hour in it is at
-or above the probability threshold. The message says rain, snow or ice, and how
-much.
+For each active location in Postgres, it fetches the NWS hourly forecast and
+raw gridpoint amounts, works out the next unfinished overnight window (8 PM →
+7 AM by default) in the location's own time zone, and publishes one ntfy message
+if any hour in it is at or above the location's probability threshold. The
+message says rain, snow or ice, and how much. A unique `(location, night)` row
+in the database makes any later run for the same night a no-op. The one
+deliberate exception is a lost ntfy response, which is resent rather than
+risk a missed alert ([D25](#d25-one-alert-per-location-per-night-a-locked-row-at-least-once)).
 
 ## Debt ledger
 
@@ -41,18 +50,20 @@ later block. Repaid rows stay, struck through, so the history is visible.
 | ~~Overnight window is always *today 20:00 → tomorrow 07:00*, regardless of when the job runs.~~ | ✅ Block 2 ([D2](#d2-which-night-a-run-evaluates)) |
 | ~~On the fall-back night the notification prints two identical "1 AM" lines.~~ *(Originally logged as "double-counts the repeated 01:00–02:00 hour". Captured payloads showed that was wrong: both 1 AM hours are real, distinct hours, and that night's window is genuinely 12 hours long. See [D3](#d3-window-edges-are-utc-instants-dst-handled-at-the-edges-only).)* | ✅ Block 2 ([D8](#d8-the-notification-answers-cushions-or-shovel-and-stays-unambiguous-on-dst-nights)) |
 | ~~`PrecipDecision` is throwaway naive code, not a tested pure function. No captured-payload tests.~~ | ✅ Block 2 ([D9](#d9-probability-decides-whether-to-alert-amounts-decide-how-loudly)) |
-| NWS gridpoint URL is re-fetched every run instead of cached. *(Moved from Block 2: the cache belongs on the Location row, and a container has no persistent disk to cache on.)* | Block 4 |
+| ~~NWS gridpoint URL is re-fetched every run instead of cached.~~ *(Moved from Block 2: the cache belongs on the Location row, and a container has no persistent disk to cache on.)* | ✅ Block 4 ([D27](#d27-the-gridpoint-and-time-zone-are-cached-on-the-location-row)) |
 | Spring-forward test payload is hand-built (`tests/Fixtures/nws/synthetic-dst-springforward`). *(New in Block 2.)* | Real capture ~2027-03-08 |
-| Coordinates and topic come from `.env` with no schema; only the window and threshold are validated. | Block 4 |
+| ~~Coordinates and topic come from `.env` with no schema; only the window and threshold are validated.~~ Coordinates, window and threshold are now rows with schema constraints. The topic deliberately stays a job secret. | ✅ Block 4 ([D26](#d26-rules-and-coordinates-are-data-their-invariants-live-in-the-schema)) |
 | No retry, backoff, circuit breaker, or timeout tuning on the HTTP calls. | Block 5 |
 | ~~Single weather provider, no abstraction seam.~~ Seam exists ([D7](#d7-nws-responses-map-onto-provider-neutral-types-surprises-fail-loudly)); second provider not yet plugged in. | Block 5 |
-| No persistence and no idempotency — every run that clears the threshold sends a notification. | Block 4 |
+| ~~No persistence and no idempotency — every run that clears the threshold sends a notification.~~ | ✅ Block 4 ([D25](#d25-one-alert-per-location-per-night-a-locked-row-at-least-once)) |
 | No tracing or metrics. | Block 6 |
 | Silence is ambiguous: "no precip" and "the job is dead" look identical. No heartbeat. | Block 6 |
 | ~~Console app only — no container, no schedule, runs from a dev machine.~~ | ✅ Block 3 ([D18](#d18-runtime-image-chiseled--extra-proved-by---self-check), [D19](#d19-the-nightly-run-is-2300-utc)) |
 | Image build, push and deploy are manual (`docker push`, `deploy/azure/deploy.sh`). CI only tests and builds. *(New in Block 3.)* | Block 7 |
-| A lost ntfy response plus the job's one retry can send the same alert twice ([D20](#d20-one-retry-and-the-duplicate-it-can-cause)). *(New in Block 3.)* | Block 4 |
+| A lost ntfy response plus the job's one retry can send the same alert twice ([D20](#d20-one-retry-and-the-duplicate-it-can-cause)). *(New in Block 3.)* Narrowed by D25 to that one ambiguous case, which is now kept on purpose: a duplicate is better than a missed alert. | Accepted ([D25](#d25-one-alert-per-location-per-night-a-locked-row-at-least-once)) |
 | Actions are pinned to major tags, not commit SHAs. Low risk while CI holds no secrets ([D24](#d24-review-deploysh-fails-closed)). *(New in Block 3.)* | Block 7 |
+| The admin API runs only on the dev box; it isn't deployed ([D30](#d30-the-admin-api-is-local-only-behind-an-api-key)). *(New in Block 4.)* | Block 7 |
+| One ntfy topic for every location. Per-location topics would mean storing a publish-capable secret in the database. *(New in Block 4.)* | Unscheduled |
 
 ## Decision log
 
@@ -676,7 +687,8 @@ forward. Each row asserts:
 #### D20. One retry, and the duplicate it can cause
 
 **Decision:** one replica, a 300 s timeout, and `replicaRetryLimit = 1`. Any
-non-zero exit makes Azure retry once. That means 1–5 from the app, but also a
+non-zero exit makes Azure retry once. That means 1–6 from the app *(6, "database not
+ready", is new in Block 4; corrected by [D32](#d32-review-exit-codes-docs-and-two-overstated-claims))*, but also a
 crash (an unhandled exception exits 134) or the timeout killing the replica.
 If the retry also fails, the execution is marked Failed.
 
@@ -691,7 +703,9 @@ again, and the phone gets the alert twice. Every other failure (config, NWS,
 incomplete forecast, a crash) happens before anything is sent, so retrying it
 is safe. After a successful publish, the only code left is one `WriteLine`
 and `return 0`. The 300 s timeout can't cut a publish short either: three
-30 s HTTP timeouts cap the run's network time at about 90 s.
+30 s HTTP timeouts cap the run's network time at about 90 s. *(With several
+locations (Block 4) the budget is per location, so many slow locations could
+reach the 300 s timeout. See [D32](#d32-review-exit-codes-docs-and-two-overstated-claims).)*
 This is accepted for now and logged as debt. Block 4's database-enforced
 `(locationId, forecastNightDate)` key turns the retry into a no-op.
 
@@ -832,3 +846,476 @@ the `.env.example` files.
 **Not changed:** actions are pinned to major version tags rather than commit
 SHAs. The workflow uses no secrets and a read-only token, so a compromised
 action has little to steal. Revisit in Block 7, when CI gets push credentials.
+
+### Block 4: persistence + API
+
+#### D25. One alert per location per night: a locked row, at-least-once
+
+**Decision:** the `alert_history` row for `(location_id, night_date)` is both
+the record and the lock. `PostgresAlertLedger.SendOnceAsync` does this in one
+transaction:
+1. **Claim:** `INSERT … ON CONFLICT (location_id, night_date) DO NOTHING`
+   against the unique index from D26.
+2. **Lock:** `SELECT … FOR UPDATE` on that row. If it's already `Sent`, stop
+   and return `AlreadySent`.
+3. **Publish to ntfy while still holding the lock.**
+4. **Commit:** only a 2xx from ntfy marks the row `Sent`, in the same
+   transaction.
+
+A second sender for the same key, whether a retry, an overlapping manual run or
+the hourly local loop, blocks at step 1 or 2 until the first one finishes. It
+then sees `Sent` and publishes nothing.
+
+**Why both statements:**
+- **The insert** is the serialization point for a brand-new night. Postgres
+  makes a second `INSERT` of the same key *wait* for the first transaction's
+  uncommitted insert, rather than fail or pass.
+- **`FOR UPDATE`** covers a night that already has a `Pending` row from an
+  earlier failed attempt. `ON CONFLICT DO NOTHING` takes no lock on an existing
+  row, so without it two senders could both read `Pending` and both publish.
+
+**The one gap, chosen on purpose (at-least-once):** exactly-once is impossible
+here, because the side effect lives in ntfy, outside the transaction. Suppose
+ntfy accepted the push but the response was lost (a timeout or a reset). The
+publish throws, the transaction rolls back, and the row stays `Pending`, so the
+next attempt sends again and the phone buzzes twice. I chose a possible
+duplicate over a possible missed alert, the same "when in doubt, warn" rule as
+D3 and D16.
+
+**Rejected:**
+- **At-most-once:** commit a `Claimed` row *before* sending; a retry that finds
+  it stays silent. That fully repays D20, but a crash or lost request after the
+  claim means **no alert that night**, which is the failure the project exists
+  to prevent.
+- **At-most-once plus releasing definite failures** (DNS errors, refused
+  connections, non-2xx). Only a timeout or reset would then stay silent. It's
+  the most nuanced option and needs the most code and tests, yet it still drops
+  the alert in the one case that is genuinely ambiguous.
+- **Deduplicating in memory, or checking first and then sending.** Two
+  processes don't share memory, and a check-then-send has a race window.
+
+**Details that matter:**
+- **A failed send is recorded, not lost.** After the rollback, a separate short
+  transaction upserts the row as `Pending`, with `attempts + 1` and
+  `last_error`. `last_error` has every URL scrubbed out, because the topic is
+  the last path segment of the publish URL. That upsert only touches rows that
+  are still `Pending`, so it can never turn a `Sent` row back. A `Pending` row
+  never blocks a send.
+- **A timeout counts as a failure, not a cancellation.** `HttpClient` reports
+  its own timeout as a `TaskCanceledException`. Only cancellation of *our* token
+  counts as "stop". A timed-out POST is exactly the lost-response case, so it is
+  recorded and retried.
+- **After the push, nothing can be cancelled.** Once ntfy has accepted, marking
+  `Sent` and committing ignore cancellation. Aborting there would only turn a
+  stop request into a duplicate.
+- **`IsSentAsync` is an optimization, not enforcement.** The nightly pass calls
+  it first so an already-sent night skips the NWS fetch. Enforcement is
+  `SendOnceAsync`, which re-checks under the lock.
+- **The key comes from D2.** A 23:00Z run and a 05:00Z retry (1 AM EDT) both
+  resolve to the same `NightDate`, which is why the retry is a no-op.
+
+**What would break it:**
+- An `idle_in_transaction_session_timeout` (server or pooler) shorter than the
+  ntfy timeout (30 s). That would kill the transaction while the lock is held
+  across the HTTP call. The row would stay `Pending`, so the next run resends.
+  That's still at-least-once, but now as a failed run. *(Corrected by [D32](#d32-review-exit-codes-docs-and-two-overstated-claims): an earlier draft blamed the pooler
+  itself, but PgBouncer in transaction mode keeps one server connection for the
+  whole transaction.)*
+- **A second duplicate window:** if the commit itself fails *after* a 2xx, the
+  row stays `Pending` and the next run resends. It's the same at-least-once
+  case, and it's accepted with it.
+- Renaming the unique index (D26).
+
+**Tests:** `tests/Worker.Tests/Alerts/`, against real Postgres:
+- `First_send_publishes_once_and_records_Sent`, and
+  `Second_send_for_the_same_key_publishes_nothing`.
+- `Retry_after_local_midnight_resolves_to_the_same_night_and_publishes_nothing`:
+  the D2 tie-in, using the real `NightWindow.Resolve`.
+- `Eight_simultaneous_senders_publish_exactly_once`: 8 contexts released by one
+  barrier, a 200 ms publish, 5 rounds, run for a brand-new night *and* for a
+  night with an earlier `Pending` row. Exactly 1 publish each round.
+- `Lost_response_is_resent_this_is_the_accepted_duplicate`: 2 publishes, by
+  design. The test exists so the gap is visible, not hidden.
+- `Http_timeout_is_a_recorded_failure_not_a_cancellation`.
+- `Crash_mid_send_leaves_no_Sent_row_and_the_next_run_publishes`: one variant
+  disposes the connection, the other uses `pg_terminate_backend`, which is
+  closer to a process dying.
+- `Earlier_Pending_row_does_not_block_a_send`, and
+  `Different_night_or_different_location_sends_independently`.
+- `Cancellation_throws_and_leaves_the_row_unchanged`.
+- `Failure_text_never_carries_a_url`.
+
+**Mutation check:**
+- **Removing `FOR UPDATE`** failed only the earlier-`Pending` race, with 8
+  publishes instead of 1. The brand-new-night race still passed, because the
+  waiting insert serializes it. A single race test would have missed this
+  mutation, which is why there are two.
+- **Removing the `ON CONFLICT` insert** failed 10 of 17 tests.
+- **A realistic "check first, insert if missing" rewrite** failed the
+  brand-new-night race. The losers got a 23505 error instead of `AlreadySent`.
+
+#### D26. Rules and coordinates are data; their invariants live in the schema
+
+**Decision:** locations, their alert rules and the alert history move into
+Postgres (`src/Persistence`, EF Core + Npgsql, snake_case names). Every rule
+that used to be an env-var check is now a **database constraint**, so any
+writer is held to it, whether that's the API, a `psql` session or a future job:
+- `alert_rules.probability_threshold` CHECK 0–100 (was D14's startup check).
+- `alert_rules` CHECK `window_start > window_end`, so the window must cross
+  midnight (was D5's).
+- `locations.latitude numeric(6,4)` CHECK ±90, `longitude numeric(7,4)` CHECK
+  ±180. Four decimal places is the NWS limit, so the column can't *store* a
+  fifth. Postgres **rounds** one on write rather than rejecting it, so rejection
+  is the code's job (below). *(Corrected by [D32](#d32-review-exit-codes-docs-and-two-overstated-claims).)*
+- `alert_history` UNIQUE `(location_id, night_date)`, named
+  `ux_alert_history_location_night`. This is the idempotency key from the
+  brief; how sends use it is D25.
+- `night_date` is a Postgres `date` (`DateOnly`), with no time and no zone. It's
+  D2's local "night the window starts on," and storing it as a timestamp would
+  invite exactly the UTC-date bug D2 guards against.
+
+The same rules are checked first in code by `AlertRuleValidation`, so a caller
+gets a message naming the field rather than a constraint violation. The
+database is the backstop, not the only line.
+
+**Coordinates:**
+- A fifth decimal place is **rejected, not rounded**, by `AlertRuleValidation`
+  (the API's path). Rounding silently moves the point by up to ~5 m, which makes
+  it a different location. A raw `psql` insert would be rounded by the column
+  instead, which is the one rule here that only the code enforces.
+- Errors name the field but never the value (D22). The exception isn't even
+  given the value as `actualValue`, because it would print it.
+- Coordinates are immutable once stored: to move, create a new location. The
+  gridpoint cached on the row (D27) then can't go stale through an edit.
+
+**Deletes:** removing a location cascades to its rule but is **restricted** by
+its alert history. What was sent is never erased as a side effect.
+
+**Rejected:**
+- Validating only in C#. Each new writer would need to remember the rules.
+- `EnsureCreated` instead of migrations. The tests would then run against EF's
+  idea of the schema instead of the one production gets (see the fixture below).
+- Storing `night_date` as `timestamptz`.
+
+**What would break it:** a raw-SQL writer that sidesteps EF is fine, since the
+constraints still hold. What breaks it is a migration that drops or renames
+the unique index. The ledger (D25) depends on its name.
+
+**Tests:**
+- `AlertRuleValidationTests`: D5, D14 and D22's cases, moved from
+  `AppConfigTests`. Every coordinate rejection asserts the digits are absent
+  from the message.
+- `SchemaSmokeTests` (in both test projects) run against **real Postgres 17**
+  in Testcontainers. A second `alert_history` row for the same location and
+  night, inserted with raw SQL that bypasses all app code, fails with SQLSTATE
+  23505 on `ux_alert_history_location_night`. A threshold of 101 fails with
+  23514. The point is that the *database* refuses.
+- The fixture (`tests/Shared/PostgresFixture.cs`) applies the real migrations
+  once to a template database and gives each test class its own copy
+  (`CREATE DATABASE … TEMPLATE`). So every DB test also proves the migrations
+  build the schema.
+
+#### D27. The gridpoint and time zone are cached on the location row
+
+**Decision:** `NwsClient` now has two steps. `ResolvePointAsync` calls
+`/points` and returns an `NwsPoint`: the zone, the hourly URL and the grid URL.
+`GetForecastAsync(NwsPoint)` fetches the forecast. `DbGridpointCache` stores the
+point on the `locations` row (`time_zone_id`, `forecast_hourly_url`,
+`forecast_grid_data_url`, `gridpoint_resolved_at`) and reuses it on every
+later run. That repays the Block 1 debt of re-fetching `/points` every night.
+
+**Invalidation:** the cache never expires on a timer. A **404** from the cached
+hourly URL throws `NwsPointStaleException`. The pass then refreshes the point
+once and retries the fetch once. If it is still stale, the location fails with
+exit 2, so it can't loop. A 500 is a plain NWS error, not "stale," because an
+outage must not churn the cache.
+
+**Rejected:**
+- **A time-to-live (TTL) cache.** It re-fetches a mapping that almost never
+  changes, and it still serves a stale URL for up to a whole TTL after NWS
+  moves it.
+- **Caching in memory.** The job runs once and exits, so nothing would survive
+  to the next night.
+
+**Why the row is the right place:** the zone is half of what makes the
+idempotency key (D2/D25), and D10 said it belongs to the location. Coordinates
+are immutable (D26), so the cached point can't drift from them.
+
+**Tests:**
+- `DbGridpointCacheTests`:
+  - the first `GetAsync` calls `/points` once and persists the columns;
+  - a second `GetAsync`, with a fresh context, makes 0 `/points` calls;
+  - `RefreshAsync` overwrites a stale URL;
+  - an hourly 404 throws stale; a 500 does not.
+- `NightlyPassTests`: `Stale_point_is_refreshed_exactly_once_and_the_fetch_retried_once`,
+  and `Still_stale_after_one_refresh_fails_the_location_with_2_and_does_not_loop`.
+- `NwsCoordinatesTests` formats with at most 4 decimals in any culture.
+
+#### D28. Migrations are explicit; a run refuses an out-of-date schema
+
+**Decision:** schema changes are applied only by `Worker --migrate`, run on
+purpose from the dev box before a deploy. Every normal run first checks that
+the database is reachable and that `GetPendingMigrationsAsync()` is empty. If
+either check fails, it exits **6** ("database not ready") before touching
+anything else.
+
+**Rejected:** migrating on startup (`Database.Migrate()` in every run). It's
+convenient, but:
+- the nightly job would need DDL rights it otherwise never uses;
+- a bad migration would run unattended at 23:00 and cost that night's alert;
+- two overlapping starts would race to migrate.
+
+**Why exit 6 and not a crash:** "the schema is behind" is an operator mistake,
+not a bug. A distinct code makes the Failed execution self-explanatory, and
+Block 6's heartbeat will see it.
+
+**What would break it:** deploying an image without running `--migrate` first.
+That's caught on the first run (exit 6), not silently ignored.
+`deploy/azure/README.md` puts the migrate step before `deploy.sh`.
+
+**Tests:**
+- `MigratorTests`: an empty DB gets every migration, a re-run is a no-op, and
+  an unreachable DB exits 6 without printing the password.
+- `NightlyPassTests`: `Pending_migrations_return_6_before_anything_else_is_touched`,
+  `Database_with_no_schema_at_all_returns_6`, and
+  `Unreachable_database_returns_6_without_echoing_the_connection_string`.
+
+#### D29. Production Postgres is Neon's free tier, on the direct endpoint
+
+**Decision:** the production database is a Neon project: Postgres 17, AWS
+`us-east-1` (nearest to Azure `eastus`), free tier. The job reaches it through
+one Container Apps secret, `db-conn`, mapped to `ConnectionStrings__Precip`.
+The connection string uses Neon's **direct** host (not the `-pooler` one), with
+`SSL Mode=VerifyFull` and `Channel Binding=Require`.
+
+**Rejected:**
+- **Azure Database for PostgreSQL Flexible Server (Burstable B1ms).** It's the
+  "enterprise" answer and lives in the same subscription and region. But it
+  costs roughly $13–16 a month for a database that is touched for a few seconds
+  a night, unless the 12-month free grant applies. It would also add a server,
+  firewall rules and an admin password to `deploy.sh`.
+- **Postgres in a container next to the job.** A Container Apps Job has no
+  durable disk, so the data would vanish with the replica.
+- **SQLite on Azure Files.** It loses the row locking that D25 depends on, and
+  file locking over SMB is not something to trust.
+
+**Why it fits:** the workload is one short transaction a night. Neon's free
+tier scales to zero when idle, and the first connect wakes it in about a
+second, well inside Npgsql's 15 s connect timeout. Nothing else in the code
+knows it's Neon: swapping providers is a new connection string and a
+`--migrate`.
+
+**Connection details that matter:**
+- **Direct, not pooled.** D25 holds a row lock across the ntfy call, and
+  `--migrate` uses session-level features. There's one job and a handful of
+  connections a night, so a pooler would add nothing but a layer to reason
+  about.
+- **`VerifyFull`, not `Require`.** `Require` encrypts but accepts any
+  certificate. `VerifyFull` also checks the CA chain and the hostname. The
+  chiseled runtime image has the CA bundle (the NWS calls over HTTPS already
+  depend on it).
+- **Neon gives a URL; Npgsql wants `key=value`.** The deploy README spells out
+  the conversion.
+- **GSSAPI is disabled in code** (`PrecipDbContext.Configure`). Npgsql 9+ tries
+  Kerberos session encryption first. The chiseled image has no
+  `libgssapi_krb5`, so the first Azure run printed "cannot load library" to
+  stderr before falling back to password auth over TLS. Harmless, but it was
+  an error line on every run.
+
+**What would break it:**
+- Neon changing its free tier or suspending an inactive project. That shows up
+  as exit 6 on the next run, and the job's Failed execution is the signal
+  (Block 6's heartbeat).
+- Pointing a *local* Worker at Neon. It would mark nights `Sent` from a dev box
+  (D32). Locally, only `--migrate` and the admin API ever use `.env.neon`.
+
+**Proof (2026-10-30, first deploy with Block 4):**
+- `--migrate` from the dev box applied `InitialSchema` to Neon.
+- The location was added through the local admin API (201).
+- `deploy.sh` with image `786dd1b9d199`. Afterwards, `az containerapp job show`
+  lists:
+  - secrets `db-conn` and `ntfy-topic` only (the lat/lon secrets are gone);
+  - args `--once`;
+  - three env vars, two of them `secretRef`s.
+- **Idempotency in production:** with the rule's threshold at 0, execution
+  `job-precip-nightly-qkxvwuk` sent one notification (`Sent`, attempts 1). The
+  next start, `job-precip-nightly-hp5qhjv`, logged
+  `Location 1 (Home): already sent for night 2026-10-30.` and published
+  nothing. The phone got exactly one alert. The threshold was then set back to
+  50.
+
+#### D30. The admin API is local-only, behind an API key
+
+**Decision:** `src/Api` is a minimal API for managing locations and their
+rules, and for reading alert history:
+- `POST /locations`, `GET /locations[/{id}]`, `PUT /locations/{id}/rule`;
+- `DELETE /locations/{id}`, which is a soft deactivate (history is kept);
+- `GET /locations/{id}/alerts`.
+
+In this block it runs only on the dev box, pointed at whichever database
+(compose or Neon). It is **not deployed**.
+
+**It still requires a key,** because it serves coordinates, which pin a home:
+- Every route except `/health` sits behind an endpoint filter that checks
+  `X-Api-Key`.
+- The comparison is `CryptographicOperations.FixedTimeEquals` over SHA-256
+  hashes. Hashing first makes the lengths equal, so the comparison's timing
+  leaks nothing.
+- A missing key or one under 32 characters stops startup.
+
+**Rejected:**
+- **Deploying it with external ingress.** That's a public endpoint holding home
+  coordinates, which means key rotation, rate limits and an attack surface,
+  all for an admin tool used a few times a year.
+- **Internal ingress only.** It would be unreachable without a VNet or a
+  jumpbox, so it would exist mostly for show.
+- **No auth "because it's local."** It runs against the production database,
+  and the key costs one filter.
+
+Deploying it publicly is debt for Block 7.
+
+**Details that matter:**
+- **Auth runs before the body is read.** Handlers read the body themselves
+  instead of using parameter binding. ASP.NET Core binds before endpoint
+  filters run, so a malformed body from a caller with no key would otherwise
+  get a 400 that reveals the shape of the API, instead of a 401.
+- **Unexpected errors return a bare 500.** The development exception page would
+  print the request headers, including the key.
+- **Errors never echo coordinates.** A 400 names the field and never echoes a
+  coordinate (D22). Database constraint errors (23505 and 23514) map to a 409
+  or 400 with fixed text, never the Postgres message.
+- **Coordinates can't be edited (D26).** No endpoint changes them.
+
+**Tests:** `ApiTests` (WebApplicationFactory against real Postgres), 40 tests:
+- `Missing_key_is_401_with_no_body` and
+  `Writes_without_a_key_are_401_even_when_the_body_is_garbage`;
+- `Five_decimal_latitude_is_400_and_the_response_never_echoes_it`, and
+  `Create_then_get_round_trips_coordinates_exactly`;
+- `Duplicate_name_is_409` and `No_endpoint_changes_coordinates`;
+- `Alerts_default_to_50_and_cap_at_500`;
+- startup refused for a missing, empty or 31-character key.
+
+#### D31. The Worker runs on the generic host: `--once` in Azure, a loop locally
+
+**Decision:** `Program.cs` builds a `Host.CreateApplicationBuilder` host, and
+one `NightlyPass` does the work in both modes:
+- **`--once`** (the deployed Container Apps Job): run one pass, return its exit
+  code, stop.
+- **No flag** (local): a `BackgroundService` runs a pass at start, then every
+  `Worker:Interval` (default 1 h). It uses a `PeriodicTimer` on the injected
+  `TimeProvider`, so tests drive it with a fake clock.
+- **`--self-check`** is still the very first statement, before config or the
+  host, because CI runs it in an image with nothing set (D18).
+
+**Why hourly is now fine:** D19 rejected an hourly schedule because every extra
+run was another chance at a duplicate alert. D25 removes that objection. The
+first run that sees precipitation alerts; every later run that night is a
+no-op. Production stays on the 23:00 UTC cron, because one run a night is all
+it needs.
+
+**Rejected:**
+- **Keeping top-level statements and constructing a `DbContext` by hand.**
+  That's a smaller diff, but every dependency would be wired by hand twice
+  (app and tests). It also isn't how a `BackgroundService` is built, which is
+  what this design note exists to show.
+- **Deferring the long-running mode.** Both modes share the pass, so the loop
+  costs one small class.
+
+**Many locations:**
+- Each active location runs inside its own try/catch, in id order.
+- The run exits with the **first failing location's code** (2 NWS, 3 ntfy, 4
+  incomplete), and every failure is logged.
+- **No active locations is exit 1**, never a quiet 0. Silence must not mean
+  "unconfigured" (problem 3 from the brief).
+- Azure's one retry (D20) re-runs every location. That's safe: sent nights are
+  no-ops, and dry ones are just re-evaluated.
+
+**Logging (D22, extended):**
+- Locations are identified by id and name only.
+- The framework's `System.Net.Http.HttpClient` logger is switched off. At
+  Information level it logs every request's full URL, and that URL contains
+  the coordinates (`/points/{lat},{lon}`) and the ntfy topic. The integration
+  agent found this; removing the filter makes two `WorkerServicesTests` fail.
+- EF Core's per-command SQL log is raised to Warning. It never carried
+  parameter values (sensitive-data logging stays off), but the SQL text was
+  most of a run's output. The local end-to-end run caught that. Failed
+  commands still log.
+
+**Tests:**
+- `NightlyPassTests` (25):
+  - every exit code;
+  - `Failing_first_location_does_not_stop_the_second_and_its_code_is_returned`;
+  - `Already_sent_night_makes_no_forecast_call_and_counts_as_ok`;
+  - `Dry_run_never_touches_the_ledger_and_prints_the_message`;
+  - `D22_no_log_line_contains_the_coordinates_or_the_topic`, a full pass over
+    six locations taking different paths, with a real `NtfyPublisher`.
+- `PassHostedServiceTests`: `--once` stops with the pass's code, and the loop
+  runs again after one fake interval and survives a crashing pass.
+- `WorkerServicesTests`: the URLs never appear in the logs, and the headers are
+  sent.
+
+### Block 4: independent review
+
+After D25–D31 and a local end-to-end run (one real notification, then
+"already sent" on the second `--once`), a separate reviewer that wrote none
+of the code checked the branch for correctness. It found **no high-severity
+defects**.
+
+What it confirmed, with evidence:
+- **The D25 locking argument** under READ COMMITTED, plus the `FOR UPDATE`
+  mutation result.
+- **No API auth bypass.**
+- **`deploy.sh` still fails closed**, and it removes the old lat/lon secrets
+  only after nothing references them.
+- **D2's night key is stable** across a minute-by-minute sweep of both DST
+  nights (2026 fall-back, 2027 spring-forward) in 8 US zones and 5 windows:
+  864,000 checks, 0 violations.
+
+#### D32. Review: exit codes, docs, and two overstated claims
+
+**Fixed:**
+- **A database error during a send was reported as an ntfy failure.** If the
+  ledger's own SQL failed (claim, lock, or the commit after a 2xx), the run
+  exited 3 and logged "publish failed." It now exits **6** and says it was the
+  ledger's database. If that commit failed after a 2xx, the push did go out,
+  and the next run resends (D25's at-least-once case). Test:
+  `Ledger_database_failure_during_send_returns_6_not_3`.
+- **Logs weren't scrubbed the way `last_error` was.** Logged exception messages
+  went out raw. Today's .NET messages carry no URL, but the logs are the more
+  widely readable copy. One `Redact` helper now scrubs both. It also catches
+  IP and `localhost` hosts (`10.0.0.5:80/topic`), which the first version
+  missed.
+- **The dev database listened on every interface.** `docker-compose.yml`
+  published `5432:5432`, which binds `0.0.0.0` and `[::]`, with a committed
+  password, and its comment said "localhost." It's now `127.0.0.1:5432:5432`.
+  A local location row is still a real home.
+- **`deploy.sh` could print "Deployed." after a failed check** (from Block 3).
+  If `registry list` failed, the stale-credential cleanup was skipped silently
+  and the script still exited 0. It now stops, like every other failed check
+  (D24). Stub runs: a failing list exits 1, and a normal update still removes
+  the old secrets.
+- **`ApiSettings.ToString()`** would have printed the API key and the
+  connection string (a record's generated `ToString`). It's redacted now;
+  nothing logged it yet.
+- **Test gap:** the D25 retry test now also runs across both DST nights. A
+  fall-back retry at 1:30 AM EST and a spring-forward retry at 3:30 AM EDT
+  each key on the night the window started.
+
+**Docs corrected in place** (marked there):
+- **D20 said "exit 1–5".** Exit 6 exists now.
+- **D20's "about 90 s" network budget is per location.** Many slow locations
+  could reach the 300 s replica timeout. Not fixed: there is one location
+  today, and Block 5's Polly timeouts are the place to bound it.
+- **D25 blamed Neon's pooler** for killing the held-lock transaction. PgBouncer
+  in transaction mode keeps one server connection for the whole transaction.
+  The real risk is an `idle_in_transaction_session_timeout` shorter than 30 s.
+- **D26 said the `numeric(6,4)` column rejects a fifth decimal place.** Postgres
+  *rounds* it on write (`40.71285` → `40.7129`). Rejection is the code's job
+  (`AlertRuleValidation`), the one rule in D26 a raw `psql` insert can bypass.
+
+**Noted, not changed:**
+- **A local Worker pointed at the production database would mark nights
+  `Sent`,** and production would then skip them. The deploy README runs only
+  `--migrate` and the API against Neon, never a send.
+- **Exit 6 has two causes.** It now covers "not ready" at startup *and* a
+  database failure mid-send. Both mean "look at the database."

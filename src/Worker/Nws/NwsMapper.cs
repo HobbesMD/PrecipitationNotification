@@ -10,18 +10,15 @@ internal static class NwsMapper
     /// <summary>
     /// Amounts are optional: if <paramref name="amountsUnavailableReason"/> is given, or the grid
     /// data is missing, mis-united or malformed, the result carries null amounts and a reason
-    /// rather than throwing or guessing zero. A missing time zone still throws — nothing
-    /// downstream can place the overnight window without it.
+    /// rather than throwing or guessing zero. The zone comes from <paramref name="point"/>;
+    /// a point without one can't exist, because <c>NwsClient.ResolvePointAsync</c> throws first.
     /// </summary>
     public static NwsForecast ToForecast(
-        PointProperties point,
+        NwsPoint point,
         IReadOnlyList<ForecastPeriod> periods,
         GridpointProperties? grid,
         string? amountsUnavailableReason = null)
     {
-        var zone = point.TimeZone
-            ?? throw new InvalidOperationException("NWS /points response had no timeZone.");
-
         var hours = periods.Select(p => new HourlyForecast(
             p.StartTime,
             p.EndTime - p.StartTime,
@@ -31,10 +28,10 @@ internal static class NwsMapper
             p.TemperatureUnit ?? "F")).ToList();
 
         if (amountsUnavailableReason is not null)
-            return new NwsForecast(zone, hours, null, amountsUnavailableReason);
+            return new NwsForecast(point.TimeZoneId, hours, null, amountsUnavailableReason);
 
         var amounts = TryMapAmounts(grid, out var reason);
-        return new NwsForecast(zone, hours, amounts, reason);
+        return new NwsForecast(point.TimeZoneId, hours, amounts, reason);
     }
 
     private static PrecipAmounts? TryMapAmounts(GridpointProperties? grid, out string? reason)
