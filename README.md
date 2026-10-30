@@ -1348,3 +1348,34 @@ What it confirmed, with evidence:
 - `Open_breaker_rejects_with_0_requests_and_a_successful_probe_closes_it`
 
 Each test asserts how many requests actually reached the server. The suite passed three consecutive full runs before commit.
+
+#### D34. ntfy is retried only when the request provably never arrived
+
+**Decision:** `AddNtfyResilience` retries the publish POST **only** for failures where ntfy cannot have processed it:
+- **Never sent:** an `HttpRequestException` whose `HttpRequestError` is `NameResolutionError`, `ConnectionError` or `SecureConnectionError`. In .NET 10's `SocketsHttpHandler` these are raised only while setting up the connection (DNS, TCP connect, TLS handshake), before any byte of the request is written. The XML doc cites the exact source lines.
+- **Not processed:** HTTP 429 and 503. RFC 9110 defines both as "didn't handle this request."
+
+**Everything else is sent exactly once:**
+- an attempt timeout, or any cancellation: the request may have been delivered;
+- a connection dropped after sending (`ResponseEnded`), or a garbled response;
+- 500, 502, 504: the server may have processed it before failing.
+
+**Why:** D25 already accepts one duplicate case, a lost response after ntfy delivered. A generic retry would add new ones: a slow-but-delivered POST timing out and being sent again. This predicate adds **no** duplicate window beyond D25's, while still riding out the failures that are truly safe to repeat (a DNS blip, a refused connection, rate limiting).
+
+**The one assumption, stated:** a 503 means "not processed." A misbehaving proxy that returned 503 after forwarding would produce exactly D25's accepted duplicate, nothing worse.
+
+**`Retry-After` is ignored.** On a 429/503 ntfy may ask for a delay. Honoring it would hold D25's row lock for as long as ntfy says, and the 30 s total timeout would cut a long wait short anyway. The backoff stays the agreed one.
+
+**No breaker:** there is one POST per alert, so there's nothing to protect.
+
+**Rejected:**
+- **Retry all transient failures.** Simplest and most resilient, but a timed-out POST that was delivered gets sent twice, a duplicate the user never chose.
+- **No ntfy retry**, leaving it to Azure's one job retry (D20). The narrowest window, but a DNS blip would then cost the whole job a re-run.
+
+**Tests:** `NtfyResilienceTests`:
+- `Two_503s_then_200_retries_and_succeeds_in_3_requests`
+- `A_status_the_origin_may_have_processed_is_sent_exactly_once` (500, 502, 504)
+- `A_response_slower_than_the_attempt_timeout_is_sent_exactly_once_and_throws`
+- `A_connection_dropped_after_the_request_was_read_is_sent_exactly_once`. WireMock can't drop a connection mid-exchange, so a raw socket reads the request and closes.
+- `A_refused_connection_is_retried_up_to_MaxAttempts_then_throws` and `An_unresolvable_host_is_retried_up_to_MaxAttempts_then_throws`
+- `Publisher_retries_a_503_and_sends_the_same_body_and_headers_twice`
