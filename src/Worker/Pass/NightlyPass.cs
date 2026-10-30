@@ -31,6 +31,11 @@ internal sealed class NightlyPass(
 
     public async Task<int> RunAsync(CancellationToken ct)
     {
+        // The soft deadline's clock starts here, before any database work, as PassOptions.Deadline
+        // documents: a slow migrations check or location query spends the same budget as a slow
+        // provider. The hard backstop (PassBackstop, in the hosted service) starts even earlier.
+        var started = clock.GetTimestamp();
+
         IReadOnlyList<Location> locations;
         try
         {
@@ -64,15 +69,14 @@ internal sealed class NightlyPass(
         }
 
         var now = clock.GetUtcNow();
-        var started = clock.GetTimestamp();
         var firstFailure = ExitCodes.Ok;
         var deadlinePassed = false;
         foreach (var location in locations)
         {
             // Checked before starting a location, never in the middle of one: a location that has
-            // begun gets to finish (its own HTTP timeouts bound it), but a slow night must not
-            // start work the job's replica timeout will kill, since a killed replica loses the
-            // exit code and the log of what was skipped.
+            // begun gets to finish (its own HTTP timeouts bound it, and the hard backstop bounds
+            // the whole pass), but a slow night must not start work the job's replica timeout will
+            // kill, since a killed replica loses the exit code and the log of what was skipped.
             if (deadlinePassed || clock.GetElapsedTime(started) >= options.Deadline)
             {
                 deadlinePassed = true;
@@ -118,7 +122,7 @@ internal sealed class NightlyPass(
 
         // ---- NWS first ----
         // Any failure on this path except our own cancellation hands the location to the fallback
-        // provider (D33). The error is kept, not thrown, so the fallback decision sits in one place.
+        // provider (D36). The error is kept, not thrown, so the fallback decision sits in one place.
         NwsPoint point;
         TimeZoneInfo? zone = null;
         NightWindow? resolved = null;

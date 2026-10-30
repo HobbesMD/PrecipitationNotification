@@ -1331,9 +1331,9 @@ What it confirmed, with evidence:
 3. **Circuit breaker, one per provider.** It opens when at least half of at least 4 calls in a 30 s window fail, and stays open for 30 s. While open, calls fail instantly with `BrokenCircuitException` and nothing reaches the network.
 4. **Attempt timeout, 10 s.** One slow response can't eat the whole budget.
 
-`HttpClient.Timeout` is set to infinite on these clients, so the pipeline owns every timeout and there are no two clocks to reason about. All numbers live in `ResilienceSettings`, bound from config (`Resilience:Nws`, `Resilience:OpenMeteo`), so tests run the same pipeline with millisecond timings.
+`HttpClient.Timeout` equals the 30 s total *(corrected by [D38](#d38-review-response-bodies-had-no-timeout-a-hard-backstop-a-breaker-for-the-gridpoint): the first version set it to infinite, which left reading the response body unbounded)*. Polly's total timeout bounds the retries up to the response headers; the client timeout bounds the whole call, body included. All numbers live in `ResilienceSettings`, bound from config (`Resilience:Nws`, `Resilience:OpenMeteo`), so tests run the same pipeline with millisecond timings.
 
-**Why the breaker, in a once-a-night job:** in `--once` mode its state dies with the process, so it does **not** remember last night's outage. What it does: within one pass, once NWS has failed enough to trip it, every later location skips NWS instantly and goes straight to Open-Meteo (D36), instead of spending 30 s each re-discovering that NWS is down. The hourly local loop (D31) keeps it across passes. Persisting breaker state in Postgres was rejected as machinery for one run a night.
+**Why the breaker, in a once-a-night job:** in `--once` mode its state dies with the process, so it does **not** remember last night's outage. What it does: within one pass, once NWS has failed enough to trip it, every later location skips NWS instantly and goes straight to Open-Meteo (D36), instead of spending 30 s each re-discovering that NWS is down. The hourly local loop (D31) keeps it across passes. The gridpoint fetch has a breaker of its own *([D38](#d38-review-response-bodies-had-no-timeout-a-hard-backstop-a-breaker-for-the-gridpoint))*, so a failing secondary endpoint can't trip the one that decides the alert. Persisting breaker state in Postgres was rejected as machinery for one run a night.
 
 **Rejected:**
 - **`AddStandardResilienceHandler` defaults.** Close to these numbers, but defaults aren't decisions, and it brings hedging and breaker settings nobody chose.
@@ -1438,6 +1438,8 @@ The D22 log guard now includes a fallback location whose errors quote a URL carr
 
 #### D37. A pass deadline that actually fits inside Azure's timeout: 100 s, exit 7
 
+*(Revised by [D38](#d38-review-response-bodies-had-no-timeout-a-hard-backstop-a-breaker-for-the-gridpoint): the arithmetic below left out database time, so a hard 270 s backstop now makes the bound real. The 100 s soft deadline still decides whether new locations start.)*
+
 **Decision:** before starting each location, `NightlyPass` checks how long the pass has run. Past **100 s**, it starts no more locations, logs each skipped one by id and name, and exits **7**, unless an earlier location already failed, whose code wins. Skipped locations are a failure, never a quiet 0: silence must not mean "not checked."
 
 **Why 100 s and not more:** the deadline only stops *new* locations. One location's worst case is six calls, each capped at 30 s by D33/D34: points, hourly and grid together, a stale refresh, the retried fetch, the Open-Meteo fallback, and ntfy. That's 180 s. A location started just before the deadline can run that long, so deadline + 180 s must stay under Azure's 300 s replica timeout: 100 + 180 = 280 s. A typical location takes 1–2 s, so 100 s still covers dozens.
@@ -1447,12 +1449,62 @@ The D22 log guard now includes a fallback location whose errors quote a URL carr
 - **240 s plus a hard cancel at 280 s.** It uses time better, but it cancels in-flight work, including possibly a send, and adds moving parts for a single-location job.
 - **No deadline.** D32 noted the per-location budget could reach the replica timeout with several locations, and then Azure, not the app, decides which location is cut off.
 
-**What would break it:** raising any pipeline's total timeout, the call count per location, or the deadline. The test `Deadline_plus_one_worst_case_location_ends_before_the_replica_timeout` recomputes the sum and fails if it crosses 280 s.
+**What would break it:** nothing silently any more ([D38](#d38-review-response-bodies-had-no-timeout-a-hard-backstop-a-breaker-for-the-gridpoint)). The soft deadline is now a best effort to finish cleanly, and the hard backstop is the guarantee. Startup refuses a hard deadline over 280 s or a soft one not below it.
 
 **Tests:**
 - `Deadline_passing_during_location_1_means_location_2_is_not_started_and_the_exit_is_7`
 - `An_earlier_failure_keeps_its_code_when_the_deadline_then_passes`
 - `Deadline_is_measured_from_the_start_and_comes_from_the_options`
-- `Deadline_plus_one_worst_case_location_ends_before_the_replica_timeout`
+- `Database_time_before_the_first_location_counts_against_the_deadline`
+- The backstop and validation tests in D38.
 
 A malformed `Worker:PassDeadline` or `Resilience:*` value fails startup with exit 1, like every other config error.
+
+### Block 5: independent review
+
+After D33–D37 and a local end-to-end run with NWS forced down, a separate reviewer that wrote none of the code checked the branch. It confirmed, with experiments:
+- **ntfy retries can't duplicate (D34).** The classification holds against .NET 10's source, and the handler's own internal retry never applies to a POST with a body.
+- **Open-Meteo's mapping matches its documentation (D35).**
+- **A fallback night keeps the NWS night key (D36).**
+- **Polly's warnings leak nothing (D22).**
+- **The WireMock tests are deterministic enough:** 7 of 7 runs passed, including three suites running at once, twice.
+
+It found one high-severity defect and two medium ones.
+
+#### D38. Review: response bodies had no timeout; a hard backstop; a breaker for the gridpoint
+
+**1. High: nothing bounded reading a response body.**
+- **The bug:** Polly's timeouts end when the response *headers* arrive, and D33 had set `HttpClient.Timeout` to infinite. A server that sent headers and then stalled mid-body hung the run until Azure killed the replica, losing the exit code and the log D37 exists to produce. It was a regression: Block 4's default 100 s client timeout had bounded it.
+- **The fix:** `HttpClient.Timeout` now equals the pipeline's 30 s total, and every body is read buffered (`GetAsync`, then `ReadFromJsonAsync`), so the read happens inside that clock. A client-timeout expiry is not our cancellation, so the pass falls back (D36) and the ledger records it as a failure (D25).
+- **Tests:** `StalledBodyTests` covers `/points`, hourly, Open-Meteo and ntfy. A raw socket sends headers and half a body, then stalls; each call throws near the total timeout, and ntfy is sent exactly once. A stalled *gridpoint* degrades to "no amounts" (D11). With the timeout set back to infinite, the tests hang until their own 15 s limit fails them.
+
+**2. Medium: one NWS breaker covered `/points`, hourly and gridpoint.**
+- **The bug:** repeated gridpoint 500s, with hourly healthy, opened it. The next location's healthy hourly call was then rejected and fell back to Open-Meteo. That broke D36's "a gridpoint-only failure is not a fallback trigger." Nothing caught it, because that test used fakes.
+- **The fix:** the gridpoint fetch goes through its own named client, `nws-grid`, with its own pipeline and breaker. It has the same headers and settings.
+- **Tests:**
+  - `Gridpoint_500s_open_only_the_grid_breaker_and_hourly_keeps_succeeding`, through the real pipelines.
+  - `With_one_shared_breaker_the_same_gridpoint_failures_would_break_hourly`: the contrast, so the test proves the bug is real.
+
+**3. Medium: D37's bound wasn't real.**
+- **The bug:** its 100 + 180 = 280 s left out database time (about 10 statements per location, each allowed 30 s by Npgsql, plus a possible wait on D25's row lock). It also started the clock after the migrations check.
+- **The fix:** a **hard backstop**. Every pass, in `--once` and in the loop, runs under a token cancelled at `Worker:HardDeadline` (default **270 s**, from the start of the pass, on the injected clock). If it fires, in-flight work is cancelled and the run exits **7** with an error log.
+- **A send interrupted by the backstop** is D25's at-least-once case: the transaction rolls back, the row stays `Pending` or absent, and the next run resends. That is the only guarantee that holds by construction, because a sum can't bound a database waiting on a lock. The soft deadline's clock now starts at the very top of the pass.
+- **Startup checks:** both deadlines must be positive, soft below hard, and hard at most 280 s; otherwise exit 1.
+- **Rejected:**
+  - **Tightening database timeouts and redoing the sum** (about a 40 s deadline). It's still arithmetic that a future change can break silently.
+  - **Documenting the assumption.** D37's title would then be false.
+- **Tests:**
+  - `Once_a_pass_still_running_at_the_hard_deadline_is_cancelled_and_the_host_stops_with_7`: at 270 s, not at 269.
+  - `Loop_the_backstop_cancels_one_pass_and_the_next_interval_still_runs`
+  - `Once_stopping_the_host_mid_pass_is_not_reported_as_a_deadline`
+  - `A_hard_deadline_over_280_seconds_fails_at_startup_without_echoing_it`, `A_soft_deadline_not_before_the_hard_one_fails_at_startup`
+  - `Database_time_before_the_first_location_counts_against_the_deadline`
+
+**Low, also fixed:**
+- **Invalid settings now fail at startup.** Values that parse but are invalid (`MaxAttempts=0`, a failure ratio over 1, a zero timeout, an attempt timeout longer than the total) used to fail only when the pass started; now startup refuses them, naming the key (`A_resilience_value_that_parses_but_is_invalid_fails_at_startup_naming_the_key`). Polly's own lower limits (breaks of at least 0.5 s, timeouts of at least 10 ms) are not checked at startup.
+- **A real °F capture.** The Open-Meteo fixture predated the temperature request, so a new capture proves the live `"°F"` unit string (`Captured_fahrenheit_payload_labels_every_hour_F`).
+- **Two small corrections.** A comment cited D33 for the fallback; it is D36. A test name claimed the *total* timeout fired when three attempt timeouts did.
+
+**Noted, not changed:**
+- **A location NWS has never resolved takes Open-Meteo's zone, and that zone isn't saved.** Once NWS resolves it, its zone could differ, and so could the night key. That can't happen on the 23:00 UTC schedule, and the different keys belong to windows that don't overlap, so no night gets two alerts.
+- **Two timeouts now race.** With the client timeout and Polly's total both at 30 s, an exhausted call fails with either `TimeoutRejectedException` or a client timeout. Every caller treats both the same.

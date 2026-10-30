@@ -22,9 +22,20 @@ namespace Worker.Resilience;
 /// <para>
 /// <b>Shape, outermost first:</b> total timeout, retry, attempt timeout. No circuit breaker:
 /// there is one POST per alert, so a breaker would never see enough calls to mean anything.
-/// <see cref="HttpClient.Timeout"/> is set to infinite so the pipeline's timeouts are the
-/// only ones. The total timeout also bounds how long the ledger holds the row lock across
-/// the HTTP call (D25's <c>idle_in_transaction_session_timeout</c> caveat).
+/// </para>
+///
+/// <para>
+/// <b>Two clocks.</b> The pipeline's total timeout bounds the retries, up to the response
+/// headers. <see cref="HttpClient.Timeout"/> is set to the same
+/// <see cref="ResilienceSettings.TotalTimeout"/> and bounds the whole call including the body,
+/// which <c>NtfyPublisher</c> lets <c>HttpClient</c> buffer inside <c>SendAsync</c> (the default
+/// <see cref="HttpCompletionOption.ResponseContentRead"/>). Together they bound how long the
+/// ledger holds the row lock across the HTTP call (D25's
+/// <c>idle_in_transaction_session_timeout</c> caveat), even against a server that answers the
+/// headers and then stalls mid-body. An <c>HttpClient</c> timeout surfaces as a
+/// <see cref="TaskCanceledException"/> while the caller's token is not cancelled, which the
+/// ledger records as a failure, not a cancellation (D25), and never retries here
+/// (<see cref="IsNeverSent"/>).
 /// </para>
 /// </summary>
 internal static class NtfyResilience
@@ -34,7 +45,7 @@ internal static class NtfyResilience
 
     /// <summary>
     /// Adds the ntfy pipeline to <paramref name="builder"/>. Call it after the client's own
-    /// configure delegate: it sets <see cref="HttpClient.Timeout"/> to infinite, and
+    /// configure delegate: it sets <see cref="HttpClient.Timeout"/> to the total timeout, and
     /// <c>ConfigureHttpClient</c> delegates run in registration order, so the last one wins.
     /// Handlers added after this call sit inside the pipeline and see every attempt.
     /// </summary>
@@ -42,7 +53,7 @@ internal static class NtfyResilience
     {
         ArgumentNullException.ThrowIfNull(settings);
 
-        builder.ConfigureHttpClient(http => http.Timeout = Timeout.InfiniteTimeSpan);
+        builder.ConfigureHttpClient(http => http.Timeout = settings.TotalTimeout);
 
         builder.AddResilienceHandler(PipelineName, pipeline =>
         {

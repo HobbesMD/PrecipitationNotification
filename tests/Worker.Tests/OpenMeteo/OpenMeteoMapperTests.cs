@@ -69,6 +69,25 @@ public class OpenMeteoMapperTests
         Assert.Equal("", hour.TemperatureUnit);
     }
 
+    /// <summary>
+    /// The unit-test cases above build the <c>°F</c> label by hand. This one proves the real API
+    /// answers with exactly that string for the query <see cref="OpenMeteoClient"/> sends, so a
+    /// change on Open-Meteo's side (say <c>"F"</c> or <c>"degF"</c>) can't silently drop every
+    /// temperature from the message (D35).
+    /// </summary>
+    [Fact]
+    public void Captured_fahrenheit_payload_labels_every_hour_F()
+    {
+        var response = FixtureFiles.Load<OpenMeteoResponse>(
+            "open-meteo/2026-10-30T1508Z_with-temperature/forecast.json");
+
+        var forecast = OpenMeteoMapper.ToForecast(response);
+
+        Assert.Equal("°F", response.HourlyUnits!["temperature_2m"]);
+        Assert.NotEmpty(forecast.Hours);
+        Assert.All(forecast.Hours, h => Assert.Equal("F", h.TemperatureUnit));
+    }
+
     // --- the captured payload ---
 
     [Fact]

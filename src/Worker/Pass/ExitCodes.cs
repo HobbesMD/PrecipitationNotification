@@ -27,8 +27,10 @@ internal static class ExitCodes
     public const int Database = 6;
 
     /// <summary>
-    /// The pass deadline passed before every location was started (and no earlier location had
-    /// failed, in which case that failure's code wins). The skipped locations are named in the log.
+    /// The soft pass deadline passed before every location was started (and no earlier location
+    /// had failed, in which case that failure's code wins); the skipped locations are named in the
+    /// log. Also: the hard deadline (<see cref="PassOptions.HardDeadline"/>) cancelled the pass
+    /// mid-flight, which always wins, since the pass never got to return a code of its own.
     /// </summary>
     public const int PassDeadline = 7;
 }

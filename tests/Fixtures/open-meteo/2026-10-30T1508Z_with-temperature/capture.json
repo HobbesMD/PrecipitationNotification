@@ -1,0 +1,5 @@
+{
+  "capturedAtUtc": "2026-10-30T15:08:02Z",
+  "label": "with-temperature",
+  "url": "https://api.open-meteo.com/v1/forecast?latitude=40.7128&longitude=-74.006&hourly=precipitation_probability,precipitation,snowfall,weather_code,temperature_2m&temperature_unit=fahrenheit&timeformat=unixtime&timezone=auto&forecast_days=4"
+}

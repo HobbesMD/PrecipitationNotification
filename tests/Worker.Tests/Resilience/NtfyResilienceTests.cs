@@ -261,7 +261,8 @@ public sealed class NtfyResilienceTests : IAsyncLifetime
         var provider = services.BuildServiceProvider();
         _owned.Add(provider);
         var client = provider.GetRequiredService<IHttpClientFactory>().CreateClient("ntfy");
-        Assert.Equal(Timeout.InfiniteTimeSpan, client.Timeout);
+        // The pipeline's total timeout replaced the 1 s set above, and also bounds the body.
+        Assert.Equal(settings.TotalTimeout, client.Timeout);
         return client;
     }
 

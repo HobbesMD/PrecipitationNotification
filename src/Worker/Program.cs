@@ -16,7 +16,7 @@ using Worker.Pass;
 // Exit codes: 0 ok, 1 no active locations / bad config / unexpected, 2 both forecast providers
 // failed (NWS and the Open-Meteo fallback), 3 ntfy publish, 4 incomplete forecast, 5 runtime
 // self-check, 6 database unreachable, migrations pending or --migrate failed, 7 pass deadline
-// reached with locations left unevaluated. See ExitCodes.
+// reached with locations left unevaluated, or the hard deadline cancelled the pass. See ExitCodes.
 
 // Before .env and config on purpose: the check needs neither, so CI can run it
 // against the built image with nothing set.
@@ -60,7 +60,8 @@ var builder = Host.CreateApplicationBuilder(args);
 
 try
 {
-    // Reads Resilience:* and Worker:PassDeadline; a malformed value must fail like any other config error.
+    // Reads Resilience:*, Worker:PassDeadline and Worker:HardDeadline; a malformed or invalid value
+    // must fail like any other config error.
     builder.Services.AddWorkerServices(config, dryRun: args.Contains("--dry-run"));
 }
 catch (InvalidOperationException ex)

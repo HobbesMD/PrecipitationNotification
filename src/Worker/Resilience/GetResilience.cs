@@ -49,11 +49,28 @@ internal static class GetResilience
     /// again. The breaker counts it too.
     /// </description></item>
     /// </list>
-    /// <see cref="HttpClient.Timeout"/> is set to infinite so these strategies own all timeouts.
+    /// <para>
+    /// <b>Two clocks, two jobs.</b> Polly's total timeout bounds the retries: every attempt and
+    /// every backoff delay, up to the moment the response headers arrive. It can't see the body,
+    /// because the pipeline returns as soon as it has a response. <see cref="HttpClient.Timeout"/>
+    /// is set to the same <see cref="ResilienceSettings.TotalTimeout"/> and bounds the whole call,
+    /// body included, as long as the caller lets <c>HttpClient</c> buffer the body inside
+    /// <c>SendAsync</c> (the default <see cref="HttpCompletionOption.ResponseContentRead"/>; see
+    /// <c>NwsClient</c> and <c>OpenMeteoClient</c>). Without it, a server that sent headers and
+    /// then stalled mid-body would hang the run until Azure killed the replica.
+    /// </para>
+    /// <para>
+    /// The two clocks have the same length and start a moment apart, so a call that exhausts the
+    /// budget fails as either <see cref="TimeoutRejectedException"/> (Polly fired first) or a
+    /// <see cref="TaskCanceledException"/> with an inner <see cref="TimeoutException"/> while the
+    /// caller's token is not cancelled (<c>HttpClient</c> fired first). Both are "the provider
+    /// timed out" to every caller: <c>NightlyPass</c> falls back on either (D36).
+    /// </para>
     /// </summary>
     public static IHttpClientBuilder AddGetResilience(this IHttpClientBuilder builder, ResilienceSettings settings)
     {
-        builder.ConfigureHttpClient(c => c.Timeout = Timeout.InfiniteTimeSpan);
+        // Run after the client's own configure delegate (registration order), so this one wins.
+        builder.ConfigureHttpClient(c => c.Timeout = settings.TotalTimeout);
 
         builder.AddResilienceHandler("get-resilience", pipeline =>
         {

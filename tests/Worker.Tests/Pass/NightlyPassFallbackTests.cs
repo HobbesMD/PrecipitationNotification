@@ -1,7 +1,15 @@
+using System.Data.Common;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Time.Testing;
+using Persistence;
 using Polly.CircuitBreaker;
 using Polly.Timeout;
 using TestSupport;
 using Worker.Forecast;
+using Worker.Hosting;
 using Worker.Nws;
 using Worker.Pass;
 using Worker.Resilience;
@@ -9,7 +17,7 @@ using Worker.Resilience;
 namespace Worker.Tests.Pass;
 
 /// <summary>
-/// The NWS-to-Open-Meteo fallback (D33) and the pass deadline, over the same real migrated
+/// The NWS-to-Open-Meteo fallback (D36) and the pass deadline, over the same real migrated
 /// Postgres as <see cref="NightlyPassTests"/> with every provider, the cache and the ledger faked.
 /// </summary>
 public sealed class NightlyPassFallbackTests(PostgresFixture postgres)
@@ -366,18 +374,146 @@ public sealed class NightlyPassFallbackTests(PostgresFixture postgres)
     }
 
     /// <summary>
-    /// D37's guarantee, as arithmetic: the last location may start just before the deadline and
-    /// then take its worst case. That must still end before Azure kills the replica (300 s), with
-    /// margin for the database work around it. Raising the deadline or any pipeline's total
-    /// timeout past the budget fails here, not in production.
+    /// The soft deadline's clock starts at the top of <c>RunAsync</c>, so time spent on the
+    /// migrations check and the location query counts. The clock is advanced by 101 s inside the
+    /// first database command of the pass; had the clock started after the queries, the location
+    /// would have been evaluated.
     /// </summary>
     [Fact]
-    public void Deadline_plus_one_worst_case_location_ends_before_the_replica_timeout()
+    public async Task Database_time_before_the_first_location_counts_against_the_deadline()
     {
-        var perCall = new[] { new ResilienceSettings().TotalTimeout }.Max();
-        var worstLocation = perCall * PassOptions.WorstCaseCallsPerLocation;
+        var advance = new AdvanceClockOnFirstCommand();
+        var options = new DbContextOptionsBuilder<PrecipDbContext>(
+                PostgresFixture.Options(await postgres.CreateDatabaseAsync()))
+            .AddInterceptors(advance)
+            .Options;
+        await using var h = PassHarness.Over(new PrecipDbContext(options));
+        var id = await h.AddLocationAsync("first", threshold: 0);
+        advance.Arm(h.Clock, TimeSpan.FromSeconds(101));
 
-        Assert.True(PassOptions.DefaultDeadline + worstLocation <= TimeSpan.FromSeconds(280),
-            $"{PassOptions.DefaultDeadline} + {worstLocation} exceeds the 280 s budget under the 300 s replica timeout.");
+        Assert.Equal(7, await h.RunAsync());
+
+        Assert.True(advance.Fired);
+        Assert.Empty(h.Cache.GetCalls);
+        Assert.Contains($"Location {id} (first): not evaluated (pass deadline", h.Logs.AllText);
+    }
+
+    // ---- Startup validation of the two deadlines (replaces D37's arithmetic test) ----
+
+    private static readonly AppConfig Config = new(
+        NtfyBaseUrl: "https://ntfy.invalid",
+        NtfyTopic: "topic-secret-xyz",
+        UserAgent: "precip-tests (test@example.invalid)",
+        ConnectionString: "Host=127.0.0.1;Port=1;Database=precip;Username=u;Password=pw;Pooling=false");
+
+    private static PassOptions Configure(params (string Key, string Value)[] values)
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(values.Select(v => new KeyValuePair<string, string?>(v.Key, v.Value)))
+            .Build();
+        using var provider = new ServiceCollection()
+            .AddWorkerServices(Config, dryRun: false, configuration)
+            .BuildServiceProvider();
+        return provider.GetRequiredService<PassOptions>();
+    }
+
+    [Fact]
+    public void The_default_deadlines_pass_validation()
+    {
+        var options = Configure();
+
+        Assert.Equal(TimeSpan.FromSeconds(100), options.Deadline);
+        Assert.Equal(TimeSpan.FromSeconds(270), options.HardDeadline);
+        Assert.True(options.HardDeadline <= PassOptions.MaxHardDeadline);
+    }
+
+    [Theory]
+    [InlineData("00:04:41")]
+    [InlineData("00:05:00")]
+    [InlineData("01:00:00")]
+    public void A_hard_deadline_over_280_seconds_fails_at_startup_without_echoing_it(string value)
+    {
+        var ex = Assert.Throws<InvalidOperationException>(() => Configure(("Worker:HardDeadline", value)));
+
+        Assert.Contains("Worker:HardDeadline", ex.Message);
+        Assert.DoesNotContain(value, ex.Message);
+    }
+
+    [Fact]
+    public void A_hard_deadline_of_exactly_280_seconds_is_accepted()
+    {
+        Assert.Equal(TimeSpan.FromSeconds(280), Configure(("Worker:HardDeadline", "00:04:40")).HardDeadline);
+    }
+
+    [Theory]
+    [InlineData("00:02:00", "00:02:00")] // equal
+    [InlineData("00:03:00", "00:02:00")] // soft after hard
+    [InlineData("00:04:30", null)]       // soft equal to the default hard
+    public void A_soft_deadline_not_before_the_hard_one_fails_at_startup(string soft, string? hard)
+    {
+        var values = new List<(string, string)> { ("Worker:PassDeadline", soft) };
+        if (hard is not null)
+            values.Add(("Worker:HardDeadline", hard));
+
+        var ex = Assert.Throws<InvalidOperationException>(() => Configure([.. values]));
+
+        Assert.Contains("Worker:PassDeadline", ex.Message);
+        Assert.Contains("Worker:HardDeadline", ex.Message);
+        Assert.DoesNotContain(soft, ex.Message);
+    }
+
+    [Theory]
+    [InlineData("soon")]
+    [InlineData("00:00:00")]
+    [InlineData("-00:01:00")]
+    public void A_hard_deadline_that_is_not_a_positive_time_span_fails_at_startup(string value)
+    {
+        var ex = Assert.Throws<InvalidOperationException>(() => Configure(("Worker:HardDeadline", value)));
+
+        Assert.Contains("Worker:HardDeadline", ex.Message);
+        Assert.DoesNotContain(value, ex.Message);
+    }
+
+    /// <summary>Advances a fake clock once, when the first database command runs after <see cref="Arm"/>.</summary>
+    private sealed class AdvanceClockOnFirstCommand : DbCommandInterceptor
+    {
+        private FakeTimeProvider? _clock;
+        private TimeSpan _by;
+
+        public bool Fired { get; private set; }
+
+        public void Arm(FakeTimeProvider clock, TimeSpan by) => (_clock, _by) = (clock, by);
+
+        private void Advance()
+        {
+            if (_clock is null || Fired)
+                return;
+            Fired = true;
+            _clock.Advance(_by);
+        }
+
+        public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(
+            DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result,
+            CancellationToken cancellationToken = default)
+        {
+            Advance();
+            return base.ReaderExecutingAsync(command, eventData, result, cancellationToken);
+        }
+
+        public override ValueTask<InterceptionResult<object>> ScalarExecutingAsync(
+            DbCommand command, CommandEventData eventData, InterceptionResult<object> result,
+            CancellationToken cancellationToken = default)
+        {
+            Advance();
+            return base.ScalarExecutingAsync(command, eventData, result, cancellationToken);
+        }
+
+        public override ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(
+            DbCommand command, CommandEventData eventData, InterceptionResult<int> result,
+            CancellationToken cancellationToken = default)
+        {
+            Advance();
+            return base.NonQueryExecutingAsync(command, eventData, result, cancellationToken);
+        }
     }
 }

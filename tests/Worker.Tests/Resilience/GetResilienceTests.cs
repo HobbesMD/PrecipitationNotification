@@ -83,19 +83,22 @@ public class GetResilienceTests
     }
 
     [Fact]
-    public async Task When_every_response_is_slow_the_call_fails_near_the_total_timeout()
+    public async Task When_every_response_is_slow_the_call_fails_after_three_attempt_timeouts()
     {
         using var s = new WireMockSupport();
         s.Sequence(new Step(200, Slow));
 
         var sw = Stopwatch.StartNew();
-        // The last attempt's timeout surfaces as TimeoutRejectedException; the exact type is
-        // asserted so a change in how Polly reports it is noticed.
+        // Each 1 s reply outlasts the 300 ms attempt timeout, so all three attempts time out
+        // (about 0.9 s plus two short backoffs), well before the 3 s total timeout. The last
+        // attempt's timeout surfaces as TimeoutRejectedException; the exact type is asserted so a
+        // change in how Polly reports it is noticed.
         await Assert.ThrowsAsync<TimeoutRejectedException>(() => s.Client.GetAsync(s.Url));
         sw.Stop();
 
-        // Total timeout is 3 s; allow 2 s slack for a loaded CI box.
-        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(5), $"took {sw.Elapsed}");
+        Assert.Equal(3, s.Arrived);
+        // Under the 3 s total timeout, so it was the attempts that ran out, not the total.
+        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(3), $"took {sw.Elapsed}");
     }
 
     [Fact]
@@ -107,12 +110,31 @@ public class GetResilienceTests
         s.Sequence(new Step(200, Slow));
 
         var sw = Stopwatch.StartNew();
-        await Assert.ThrowsAsync<TimeoutRejectedException>(() => s.Client.GetAsync(s.Url));
+        var ex = await Assert.ThrowsAnyAsync<Exception>(() => s.Client.GetAsync(s.Url));
         sw.Stop();
 
+        AssertTotalTimeout(ex);
         Assert.True(sw.Elapsed < TimeSpan.FromSeconds(3), $"took {sw.Elapsed}");
         Assert.Equal(1, s.Arrived);
     }
+
+    [Fact]
+    public void The_client_timeout_equals_the_total_timeout()
+    {
+        // HttpClient.Timeout bounds the body, which Polly can't see (D33).
+        using var s = new WireMockSupport();
+        Assert.Equal(WireMockSupport.Fast.TotalTimeout, s.Client.Timeout);
+    }
+
+    /// <summary>
+    /// HttpClient.Timeout equals the total timeout, and its clock starts a moment before Polly's,
+    /// so whichever fires first reports the timeout: Polly as TimeoutRejectedException, HttpClient
+    /// as TaskCanceledException wrapping a TimeoutException. Both mean "the budget ran out".
+    /// </summary>
+    internal static void AssertTotalTimeout(Exception ex) =>
+        Assert.True(
+            ex is TimeoutRejectedException or TaskCanceledException { InnerException: TimeoutException },
+            $"expected a timeout, got {ex.GetType().Name}: {ex.Message}");
 
     [Fact]
     public async Task Open_breaker_rejects_with_0_requests_and_a_successful_probe_closes_it()

@@ -25,6 +25,10 @@ internal sealed class OpenMeteoClient(HttpClient http, OpenMeteoOptions options)
         var url = string.Create(CultureInfo.InvariantCulture,
             $"{options.BaseUrl}v1/forecast?latitude={Math.Round(lat, 4):0.####}&longitude={Math.Round(lon, 4):0.####}{Query}");
 
+        // GetAsync's default (ResponseContentRead) buffers the whole body inside SendAsync, under
+        // HttpClient.Timeout (set to the pipeline's total timeout, D33), so a server that sends
+        // headers and then stalls can't hang the pass. The JSON below is parsed from memory.
+        // Never GetFromJsonAsync or ResponseHeadersRead: they stream the body after the headers.
         using var response = await http.GetAsync(url, ct);
         response.EnsureSuccessStatusCode();
 
