@@ -995,3 +995,54 @@ the unique index. The ledger (D25) depends on its name.
   once to a template database and gives each test class its own copy
   (`CREATE DATABASE … TEMPLATE`). So every DB test also proves the migrations
   build the schema.
+
+#### D30. The admin API is local-only, behind an API key
+
+**Decision:** `src/Api` is a minimal API for managing locations and their
+rules, and for reading alert history:
+- `POST /locations`, `GET /locations[/{id}]`, `PUT /locations/{id}/rule`;
+- `DELETE /locations/{id}`, which is a soft deactivate (history is kept);
+- `GET /locations/{id}/alerts`.
+
+In this block it runs only on the dev box, pointed at whichever database
+(compose or Neon). It is **not deployed**.
+
+**It still requires a key,** because it serves coordinates, which pin a home:
+- Every route except `/health` sits behind an endpoint filter that checks
+  `X-Api-Key`.
+- The comparison is `CryptographicOperations.FixedTimeEquals` over SHA-256
+  hashes. Hashing first makes the lengths equal, so the comparison's timing
+  leaks nothing.
+- A missing key or one under 32 characters stops startup.
+
+**Rejected:**
+- **Deploying it with external ingress.** That's a public endpoint holding home
+  coordinates, which means key rotation, rate limits and an attack surface,
+  all for an admin tool used a few times a year.
+- **Internal ingress only.** It would be unreachable without a VNet or a
+  jumpbox, so it would exist mostly for show.
+- **No auth "because it's local."** It runs against the production database,
+  and the key costs one filter.
+
+Deploying it publicly is debt for Block 7.
+
+**Details that matter:**
+- **Auth runs before the body is read.** Handlers read the body themselves
+  instead of using parameter binding. ASP.NET Core binds before endpoint
+  filters run, so a malformed body from a caller with no key would otherwise
+  get a 400 that reveals the shape of the API, instead of a 401.
+- **Unexpected errors return a bare 500.** The development exception page would
+  print the request headers, including the key.
+- **Errors never echo coordinates.** A 400 names the field and never echoes a
+  coordinate (D22). Database constraint errors (23505 and 23514) map to a 409
+  or 400 with fixed text, never the Postgres message.
+- **Coordinates can't be edited (D26).** No endpoint changes them.
+
+**Tests:** `ApiTests` (WebApplicationFactory against real Postgres), 40 tests:
+- `Missing_key_is_401_with_no_body` and
+  `Writes_without_a_key_are_401_even_when_the_body_is_garbage`;
+- `Five_decimal_latitude_is_400_and_the_response_never_echoes_it`, and
+  `Create_then_get_round_trips_coordinates_exactly`;
+- `Duplicate_name_is_409` and `No_endpoint_changes_coordinates`;
+- `Alerts_default_to_50_and_cap_at_500`;
+- startup refused for a missing, empty or 31-character key.
