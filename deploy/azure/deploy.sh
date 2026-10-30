@@ -122,7 +122,12 @@ if exists az containerapp job show -n "$AZ_JOB" -g "$AZ_RG"; then
   if [[ $use_registry -eq 1 ]]; then
     az containerapp job registry set -n "$AZ_JOB" -g "$AZ_RG" \
       --server ghcr.io --username "$GHCR_USER" --password "$GHCR_PAT" -o none
-  elif [[ -n "$(az containerapp job registry list -n "$AZ_JOB" -g "$AZ_RG" --query "[?server=='ghcr.io'].server" -o tsv)" ]]; then
+  # Assigned separately: `if [[ -n "$(cmd)" ]]` ignores a failing cmd, so a broken list would
+  # skip the cleanup silently and still print "Deployed." (D24: fail closed).
+  elif ! ghcr_entries=$(az containerapp job registry list -n "$AZ_JOB" -g "$AZ_RG" --query "[?server=='ghcr.io'].server" -o tsv); then
+    echo "Could not list registry credentials on $AZ_JOB; stopping." >&2
+    exit 1
+  elif [[ -n "${ghcr_entries//[$'\r\n']/}" ]]; then
     # Public image now: drop the old credential. GHCR rejects a pull with a bad
     # PAT even for a public image, so a stale one would break the job when it expires.
     echo "Removing ghcr.io registry credentials (public image)..."

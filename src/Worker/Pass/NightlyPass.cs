@@ -233,6 +233,16 @@ internal sealed class NightlyPass(
                     "Location {LocationId} ({LocationName}): AlreadySent for night {NightDate:yyyy-MM-dd}; nothing published.",
                     location.Id, location.Name, window.NightDate);
         }
+        catch (Exception ex) when (IsDatabaseFailure(ex))
+        {
+            // The ledger's own statements failed (claim, lock or commit), not ntfy. If the commit
+            // failed after a 2xx the push did go out; either way the row isn't Sent, so the next
+            // run sends (D25's at-least-once case). Exit 6 says where to look, not "ntfy down".
+            log.LogError(
+                "Location {LocationId} ({LocationName}): alert ledger database error during send: {Error}",
+                location.Id, location.Name, Describe(ex));
+            return ExitCodes.Database;
+        }
         catch (Exception ex) when (Failed(ex, ct))
         {
             log.LogError(
@@ -252,5 +262,14 @@ internal sealed class NightlyPass(
     /// Type and message only, never the exception object (its inner exceptions and stack are
     /// not vetted for secrets). Our own exceptions keep coordinates and URLs out of messages (D22).
     /// </summary>
-    private static string Describe(Exception ex) => $"{ex.GetType().Name}: {ex.Message}";
+    private static string Describe(Exception ex) => Redact.Describe(ex);
+
+    /// <summary>
+    /// Npgsql errors derive from <see cref="System.Data.Common.DbException"/>; EF wraps some in
+    /// <see cref="DbUpdateException"/> or an <see cref="InvalidOperationException"/>, so look one
+    /// level in. A publish failure (HttpRequestException, timeout) never matches.
+    /// </summary>
+    private static bool IsDatabaseFailure(Exception ex) =>
+        ex is System.Data.Common.DbException or DbUpdateException
+        || ex.InnerException is System.Data.Common.DbException;
 }

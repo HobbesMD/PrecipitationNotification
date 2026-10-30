@@ -132,6 +132,23 @@ public sealed class NightlyPassTests(PostgresFixture postgres)
         Assert.Contains("publish failed", h.Logs.AllText);
     }
 
+    /// <summary>
+    /// The ledger's own SQL failing (claim, lock, or the commit after a 2xx) is a database
+    /// problem, not ntfy: exit 6, and the log must not say "publish failed".
+    /// </summary>
+    [Fact]
+    public async Task Ledger_database_failure_during_send_returns_6_not_3()
+    {
+        await using var h = await NewHarness();
+        await h.AddLocationAsync("alpha", threshold: 0);
+        h.Ledger.Publish = (_, _, _) => throw new Npgsql.NpgsqlException("connection reset");
+
+        Assert.Equal(6, await h.RunAsync());
+
+        Assert.Contains("ledger database error", h.Logs.AllText);
+        Assert.DoesNotContain("publish failed", h.Logs.AllText);
+    }
+
     [Fact]
     public async Task Gap_with_no_hits_returns_4_instead_of_a_dry_verdict()
     {

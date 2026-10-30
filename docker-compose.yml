@@ -2,9 +2,10 @@
 #
 #   docker compose up -d
 #
-# The password below is DEV-ONLY: the port is published to localhost and nothing
-# real lives in this database. Never reuse it anywhere else. Production credentials
-# come from the environment and are never committed.
+# The password below is DEV-ONLY: the port is published on 127.0.0.1 only. Never
+# reuse it anywhere else. A location row here still holds real coordinates, so
+# the database is not world-readable either. Production credentials come from the
+# environment and are never committed.
 services:
   postgres:
     # Same major version as the Testcontainers fixture (tests/Shared/PostgresFixture.cs).
@@ -14,7 +15,8 @@ services:
       POSTGRES_PASSWORD: dev-only-password
       POSTGRES_DB: precip
     ports:
-      - "5432:5432"
+      # 127.0.0.1 only: a bare "5432:5432" binds every interface (0.0.0.0 and [::]).
+      - "127.0.0.1:5432:5432"
     volumes:
       - precip-pgdata:/var/lib/postgresql/data
     healthcheck:

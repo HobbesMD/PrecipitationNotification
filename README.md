@@ -687,7 +687,8 @@ forward. Each row asserts:
 #### D20. One retry, and the duplicate it can cause
 
 **Decision:** one replica, a 300 s timeout, and `replicaRetryLimit = 1`. Any
-non-zero exit makes Azure retry once. That means 1–5 from the app, but also a
+non-zero exit makes Azure retry once. That means 1–6 from the app *(6, "database not
+ready", is new in Block 4; corrected by [D32](#d32-review-exit-codes-docs-and-two-overstated-claims))*, but also a
 crash (an unhandled exception exits 134) or the timeout killing the replica.
 If the retry also fails, the execution is marked Failed.
 
@@ -702,7 +703,9 @@ again, and the phone gets the alert twice. Every other failure (config, NWS,
 incomplete forecast, a crash) happens before anything is sent, so retrying it
 is safe. After a successful publish, the only code left is one `WriteLine`
 and `return 0`. The 300 s timeout can't cut a publish short either: three
-30 s HTTP timeouts cap the run's network time at about 90 s.
+30 s HTTP timeouts cap the run's network time at about 90 s. *(With several
+locations (Block 4) the budget is per location, so many slow locations could
+reach the 300 s timeout. See [D32](#d32-review-exit-codes-docs-and-two-overstated-claims).)*
 This is accepted for now and logged as debt. Block 4's database-enforced
 `(locationId, forecastNightDate)` key turns the retry into a no-op.
 
@@ -912,10 +915,12 @@ D3 and D16.
   resolve to the same `NightDate`, which is why the retry is a no-op.
 
 **What would break it:**
-- Neon's pooled (PgBouncer) endpoint, or an `idle_in_transaction_session_timeout`
-  shorter than the ntfy timeout (30 s). Either would kill the transaction while
-  the lock is held across the HTTP call. Production uses the direct endpoint
-  (D29).
+- An `idle_in_transaction_session_timeout` (server or pooler) shorter than the
+  ntfy timeout (30 s). That would kill the transaction while the lock is held
+  across the HTTP call. The row would stay `Pending`, so the next run resends.
+  That's still at-least-once, but now as a failed run. *(Corrected by [D32](#d32-review-exit-codes-docs-and-two-overstated-claims): an earlier draft blamed the pooler
+  itself, but PgBouncer in transaction mode keeps one server connection for the
+  whole transaction.)*
 - **A second duplicate window:** if the commit itself fails *after* a 2xx, the
   row stays `Pending` and the next run resends. It's the same at-least-once
   case, and it's accepted with it.
@@ -959,8 +964,9 @@ writer is held to it, whether that's the API, a `psql` session or a future job:
 - `alert_rules` CHECK `window_start > window_end`, so the window must cross
   midnight (was D5's).
 - `locations.latitude numeric(6,4)` CHECK ±90, `longitude numeric(7,4)` CHECK
-  ±180. Four decimal places is the NWS limit, so the column type makes it
-  structural.
+  ±180. Four decimal places is the NWS limit, so the column can't *store* a
+  fifth. Postgres **rounds** one on write rather than rejecting it, so rejection
+  is the code's job (below). *(Corrected by [D32](#d32-review-exit-codes-docs-and-two-overstated-claims).)*
 - `alert_history` UNIQUE `(location_id, night_date)`, named
   `ux_alert_history_location_night`. This is the idempotency key from the
   brief; how sends use it is D25.
@@ -973,8 +979,10 @@ gets a message naming the field rather than a constraint violation. The
 database is the backstop, not the only line.
 
 **Coordinates:**
-- A fifth decimal place is **rejected, not rounded**. Rounding silently moves
-  the point by up to ~5 m, which makes it a different location.
+- A fifth decimal place is **rejected, not rounded**, by `AlertRuleValidation`
+  (the API's path). Rounding silently moves the point by up to ~5 m, which makes
+  it a different location. A raw `psql` insert would be rounded by the column
+  instead, which is the one rule here that only the code enforces.
 - Errors name the field but never the value (D22). The exception isn't even
   given the value as `actualValue`, because it would print it.
 - Coordinates are immutable once stored: to move, create a new location. The
@@ -1181,3 +1189,69 @@ it needs.
   runs again after one fake interval and survives a crashing pass.
 - `WorkerServicesTests`: the URLs never appear in the logs, and the headers are
   sent.
+
+### Block 4: independent review
+
+After D25–D31 and a local end-to-end run (one real notification, then
+"already sent" on the second `--once`), a separate reviewer that wrote none
+of the code checked the branch for correctness. It found **no high-severity
+defects**.
+
+What it confirmed, with evidence:
+- **The D25 locking argument** under READ COMMITTED, plus the `FOR UPDATE`
+  mutation result.
+- **No API auth bypass.**
+- **`deploy.sh` still fails closed**, and it removes the old lat/lon secrets
+  only after nothing references them.
+- **D2's night key is stable** across a minute-by-minute sweep of both DST
+  nights (2026 fall-back, 2027 spring-forward) in 8 US zones and 5 windows:
+  864,000 checks, 0 violations.
+
+#### D32. Review: exit codes, docs, and two overstated claims
+
+**Fixed:**
+- **A database error during a send was reported as an ntfy failure.** If the
+  ledger's own SQL failed (claim, lock, or the commit after a 2xx), the run
+  exited 3 and logged "publish failed." It now exits **6** and says it was the
+  ledger's database. If that commit failed after a 2xx, the push did go out,
+  and the next run resends (D25's at-least-once case). Test:
+  `Ledger_database_failure_during_send_returns_6_not_3`.
+- **Logs weren't scrubbed the way `last_error` was.** Logged exception messages
+  went out raw. Today's .NET messages carry no URL, but the logs are the more
+  widely readable copy. One `Redact` helper now scrubs both. It also catches
+  IP and `localhost` hosts (`10.0.0.5:80/topic`), which the first version
+  missed.
+- **The dev database listened on every interface.** `docker-compose.yml`
+  published `5432:5432`, which binds `0.0.0.0` and `[::]`, with a committed
+  password, and its comment said "localhost." It's now `127.0.0.1:5432:5432`.
+  A local location row is still a real home.
+- **`deploy.sh` could print "Deployed." after a failed check** (from Block 3).
+  If `registry list` failed, the stale-credential cleanup was skipped silently
+  and the script still exited 0. It now stops, like every other failed check
+  (D24). Stub runs: a failing list exits 1, and a normal update still removes
+  the old secrets.
+- **`ApiSettings.ToString()`** would have printed the API key and the
+  connection string (a record's generated `ToString`). It's redacted now;
+  nothing logged it yet.
+- **Test gap:** the D25 retry test now also runs across both DST nights. A
+  fall-back retry at 1:30 AM EST and a spring-forward retry at 3:30 AM EDT
+  each key on the night the window started.
+
+**Docs corrected in place** (marked there):
+- **D20 said "exit 1–5".** Exit 6 exists now.
+- **D20's "about 90 s" network budget is per location.** Many slow locations
+  could reach the 300 s replica timeout. Not fixed: there is one location
+  today, and Block 5's Polly timeouts are the place to bound it.
+- **D25 blamed Neon's pooler** for killing the held-lock transaction. PgBouncer
+  in transaction mode keeps one server connection for the whole transaction.
+  The real risk is an `idle_in_transaction_session_timeout` shorter than 30 s.
+- **D26 said the `numeric(6,4)` column rejects a fifth decimal place.** Postgres
+  *rounds* it on write (`40.71285` → `40.7129`). Rejection is the code's job
+  (`AlertRuleValidation`), the one rule in D26 a raw `psql` insert can bypass.
+
+**Noted, not changed:**
+- **A local Worker pointed at the production database would mark nights
+  `Sent`,** and production would then skip them. The deploy README runs only
+  `--migrate` and the API against Neon, never a send.
+- **Exit 6 has two causes.** It now covers "not ready" at startup *and* a
+  database failure mid-send. Both mean "look at the database."

@@ -47,7 +47,7 @@ internal sealed class OncePassService(
         catch (Exception ex)
         {
             exit.Code = ExitCodes.Failure;
-            log.LogError("Pass crashed: {Error}", $"{ex.GetType().Name}: {ex.Message}");
+            log.LogError("Pass crashed: {Error}", Redact.Describe(ex));
         }
         finally
         {
@@ -105,7 +105,7 @@ internal sealed class PassLoopService(
         }
         catch (Exception ex)
         {
-            log.LogError("Pass crashed: {Error}; will try again in {Interval}.", $"{ex.GetType().Name}: {ex.Message}", options.Interval);
+            log.LogError("Pass crashed: {Error}; will try again in {Interval}.", Redact.Describe(ex), options.Interval);
         }
     }
 }

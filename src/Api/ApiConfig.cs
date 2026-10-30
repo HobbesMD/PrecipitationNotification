@@ -1,7 +1,11 @@
 namespace Api;
 
 /// <summary>What the host needs before it may start listening.</summary>
-public sealed record ApiSettings(string ApiKey, string ConnectionString);
+public sealed record ApiSettings(string ApiKey, string ConnectionString)
+{
+    // A record's generated ToString prints every property; both of these are secrets.
+    public override string ToString() => "ApiSettings { ApiKey = [redacted], ConnectionString = [redacted] }";
+}
 
 /// <summary>
 /// Startup configuration. The API holds the secrets that pin the owner's home (coordinates), so

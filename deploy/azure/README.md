@@ -2,7 +2,7 @@
 
 `deploy.sh` creates or updates a nightly Azure Container Apps Job that runs the
 alerter container once (`Worker --once`) and exits: 0 on success, non-zero on
-failure (1–5 from the app, or a crash or timeout). It is safe to re-run: it
+failure (1–6 from the app, or a crash or timeout). It is safe to re-run: it
 checks each resource, then creates or updates it. A failed check that isn't
 "not found" (expired login, unregistered provider) stops the script instead of
 creating anything.
@@ -262,7 +262,7 @@ ContainerAppConsoleLogs_CL
 (Column names such as `ContainerJobName_s` may vary too; `ContainerAppConsoleLogs_CL
 | take 5` shows the real schema.)
 
-Execution status `Succeeded` means exit 0; `Failed` means a non-zero exit (1–5 from the app, or a crash or timeout) after the one
+Execution status `Succeeded` means exit 0; `Failed` means a non-zero exit (1–6 from the app, or a crash or timeout) after the one
 retry.
 
 ## Cost

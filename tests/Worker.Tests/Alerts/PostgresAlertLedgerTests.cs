@@ -81,12 +81,21 @@ public sealed class PostgresAlertLedgerTests(PostgresFixture postgres) : IAsyncL
     /// It must still resolve to the night that started on the 29th, or the unique key
     /// can't stop the second alert.
     /// </summary>
-    [Fact]
-    public async Task Retry_after_local_midnight_resolves_to_the_same_night_and_publishes_nothing()
+    /// <remarks>
+    /// Also run across both DST nights: on fall-back the retry lands in the <em>second</em>
+    /// 1 AM hour (EST), on spring-forward just after the skipped 2 AM hour (EDT).
+    /// </remarks>
+    [Theory]
+    [InlineData("2026-10-29T23:00:00Z", "2026-10-30T05:00:00Z", "2026-10-29")] // 7 PM EDT, 1 AM EDT next local day
+    [InlineData("2026-10-31T23:00:00Z", "2026-11-01T06:30:00Z", "2026-10-31")] // fall-back: retry at 1:30 AM EST
+    [InlineData("2027-03-13T23:00:00Z", "2027-03-14T07:30:00Z", "2027-03-13")] // spring-forward: retry at 3:30 AM EDT
+    public async Task Retry_after_local_midnight_resolves_to_the_same_night_and_publishes_nothing(
+        string runAt, string retryAt, string expectedNight)
     {
-        var run = Alert.NightFor(new DateTimeOffset(2026, 10, 29, 23, 0, 0, TimeSpan.Zero));   // 7 PM EDT
-        var retry = Alert.NightFor(new DateTimeOffset(2026, 10, 30, 5, 0, 0, TimeSpan.Zero));  // 1 AM EDT, next local day
-        Assert.Equal(new DateOnly(2026, 10, 29), run.NightDate);
+        var retryInstant = DateTimeOffset.Parse(retryAt, System.Globalization.CultureInfo.InvariantCulture);
+        var run = Alert.NightFor(DateTimeOffset.Parse(runAt, System.Globalization.CultureInfo.InvariantCulture));
+        var retry = Alert.NightFor(retryInstant);
+        Assert.Equal(DateOnly.Parse(expectedNight, System.Globalization.CultureInfo.InvariantCulture), run.NightDate);
         Assert.Equal(run.NightDate, retry.NightDate);
 
         var publisher = new FakeAlertPublisher();
@@ -94,7 +103,7 @@ public sealed class PostgresAlertLedgerTests(PostgresFixture postgres) : IAsyncL
             Assert.Equal(SendOutcome.Sent, await new PostgresAlertLedger(ctx, publisher, _clock).SendAsync(_locationId, run));
 
         // A separate process in real life: a new context, a later clock.
-        _clock.Now = new DateTimeOffset(2026, 10, 30, 5, 0, 0, TimeSpan.Zero);
+        _clock.Now = retryInstant;
         await using (var ctx = _db.NewContext())
         {
             var ledger = new PostgresAlertLedger(ctx, publisher, _clock);
@@ -312,6 +321,8 @@ public sealed class PostgresAlertLedgerTests(PostgresFixture postgres) : IAsyncL
     [InlineData("POST https://ntfy.sh/my-secret-topic failed", "POST [url removed] failed")]
     [InlineData("connect to ntfy.sh:443/my-secret-topic refused", "connect to [url removed] refused")]
     [InlineData("No such host is known. (ntfy.sh:443)", "No such host is known. (ntfy.sh:443)")]
+    [InlineData("connect to 10.0.0.5:80/my-secret-topic refused", "connect to [url removed] refused")]
+    [InlineData("connect to localhost:8080/my-secret-topic refused", "connect to [url removed] refused")]
     public void Failure_text_never_carries_a_url(string message, string stored)
     {
         Assert.Equal(stored, PostgresAlertLedger.ScrubUrls(message));

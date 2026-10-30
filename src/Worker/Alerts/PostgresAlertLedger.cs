@@ -1,4 +1,3 @@
-using System.Text.RegularExpressions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
 using Persistence;
@@ -38,7 +37,7 @@ namespace Worker.Alerts;
 /// the context for the next call to trip over.
 /// </para>
 /// </summary>
-internal sealed partial class PostgresAlertLedger(PrecipDbContext db, IAlertPublisher publisher, TimeProvider clock)
+internal sealed class PostgresAlertLedger(PrecipDbContext db, IAlertPublisher publisher, TimeProvider clock)
     : IAlertLedger
 {
     /// <summary>
@@ -197,17 +196,7 @@ internal sealed partial class PostgresAlertLedger(PrecipDbContext db, IAlertPubl
     /// the API may show.
     /// </summary>
     internal static string DescribeFailure(Exception ex) =>
-        $"{ex.GetType().FullName}: {ScrubUrls(ex.Message)}";
+        $"{ex.GetType().FullName}: {Redact.Urls(ex.Message)}";
 
-    internal static string ScrubUrls(string text) => UrlShaped().Replace(text, "[url removed]");
-
-    /// <summary>
-    /// Either a scheme URL (<c>https://host/topic</c>), or a bare host with a path
-    /// (<c>ntfy.sh/topic</c>, <c>ntfy.sh:443/topic</c>). A bare host with no path is left
-    /// alone: it carries no topic and is useful when diagnosing DNS failures.
-    /// </summary>
-    [GeneratedRegex(
-        @"\b[a-z][a-z0-9+.\-]*://\S*|\b(?:[a-z0-9\-]+\.)+[a-z]{2,}(?::\d+)?/\S*",
-        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
-    private static partial Regex UrlShaped();
+    internal static string ScrubUrls(string text) => Redact.Urls(text);
 }
