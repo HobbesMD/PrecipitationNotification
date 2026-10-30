@@ -1,3 +1,4 @@
+using Npgsql;
 using Microsoft.EntityFrameworkCore;
 
 namespace Persistence;
@@ -32,7 +33,13 @@ public sealed class PrecipDbContext(DbContextOptions<PrecipDbContext> options) :
     /// </summary>
     public static DbContextOptionsBuilder<PrecipDbContext> Configure(
         DbContextOptionsBuilder<PrecipDbContext> builder, string connectionString) =>
-        builder.UseNpgsql(connectionString);
+        builder.UseNpgsql(new NpgsqlConnectionStringBuilder(connectionString)
+        {
+            // Npgsql 9+ tries GSSAPI (Kerberos) session encryption first. The chiseled runtime
+            // image has no libgssapi_krb5, so every connect printed a "cannot load library" error
+            // to stderr before falling back. We authenticate by password over TLS; never Kerberos.
+            GssEncryptionMode = GssEncryptionMode.Disable,
+        }.ConnectionString);
 
     protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder) =>
         optionsBuilder.UseSnakeCaseNamingConvention();

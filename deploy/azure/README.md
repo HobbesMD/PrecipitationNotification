@@ -32,13 +32,16 @@ migrations: you apply them explicitly (see [Migrate](#migrate)).
   to a commit. `:latest`, `:main` and untagged images are rejected.
 - The GHCR package set to **public** (once, in the package's settings on
   GitHub; new packages start private even on a public repo).
-- A Neon project and database. Its connection string, in Npgsql format
-  (`Host=...;Database=...;Username=...;Password=...;SSL Mode=Require`; Neon
-  requires TLS), goes in a gitignored **`.env.neon`**, one line:
+- A Neon project and database (Postgres 17, AWS US East, the direct host, with
+  connection pooling **off**). Neon's Connect panel gives a
+  `postgresql://user:pass@host/db?sslmode=require&channel_binding=require` URL.
+  Npgsql doesn't take URLs, so convert it to key=value form:
+  `Host=...;Port=5432;Database=...;Username=...;Password=...;SSL Mode=VerifyFull;Channel Binding=Require`.
+  `VerifyFull` also checks the certificate and hostname; `Require` only
+  encrypts. Put it in a gitignored **`.env.neon`** as the single line
   `ConnectionStrings__Precip=...`. It is kept apart from `.env` because `.env`
   points at your local Docker database, and the two must never be confused.
-  Use Neon's **direct** (non-pooled) host, which is the safe choice for
-  migrations. `.env.*` is already in `.gitignore` and `.dockerignore`.
+  `.env.*` is already in `.gitignore` and `.dockerignore`. See D29.
 
 ## Variables
 

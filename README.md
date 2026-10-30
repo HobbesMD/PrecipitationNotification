@@ -1080,6 +1080,70 @@ That's caught on the first run (exit 6), not silently ignored.
   `Database_with_no_schema_at_all_returns_6`, and
   `Unreachable_database_returns_6_without_echoing_the_connection_string`.
 
+#### D29. Production Postgres is Neon's free tier, on the direct endpoint
+
+**Decision:** the production database is a Neon project: Postgres 17, AWS
+`us-east-1` (nearest to Azure `eastus`), free tier. The job reaches it through
+one Container Apps secret, `db-conn`, mapped to `ConnectionStrings__Precip`.
+The connection string uses Neon's **direct** host (not the `-pooler` one), with
+`SSL Mode=VerifyFull` and `Channel Binding=Require`.
+
+**Rejected:**
+- **Azure Database for PostgreSQL Flexible Server (Burstable B1ms).** It's the
+  "enterprise" answer and lives in the same subscription and region. But it
+  costs roughly $13–16 a month for a database that is touched for a few seconds
+  a night, unless the 12-month free grant applies. It would also add a server,
+  firewall rules and an admin password to `deploy.sh`.
+- **Postgres in a container next to the job.** A Container Apps Job has no
+  durable disk, so the data would vanish with the replica.
+- **SQLite on Azure Files.** It loses the row locking that D25 depends on, and
+  file locking over SMB is not something to trust.
+
+**Why it fits:** the workload is one short transaction a night. Neon's free
+tier scales to zero when idle, and the first connect wakes it in about a
+second, well inside Npgsql's 15 s connect timeout. Nothing else in the code
+knows it's Neon: swapping providers is a new connection string and a
+`--migrate`.
+
+**Connection details that matter:**
+- **Direct, not pooled.** D25 holds a row lock across the ntfy call, and
+  `--migrate` uses session-level features. There's one job and a handful of
+  connections a night, so a pooler would add nothing but a layer to reason
+  about.
+- **`VerifyFull`, not `Require`.** `Require` encrypts but accepts any
+  certificate. `VerifyFull` also checks the CA chain and the hostname. The
+  chiseled runtime image has the CA bundle (the NWS calls over HTTPS already
+  depend on it).
+- **Neon gives a URL; Npgsql wants `key=value`.** The deploy README spells out
+  the conversion.
+- **GSSAPI is disabled in code** (`PrecipDbContext.Configure`). Npgsql 9+ tries
+  Kerberos session encryption first. The chiseled image has no
+  `libgssapi_krb5`, so the first Azure run printed "cannot load library" to
+  stderr before falling back to password auth over TLS. Harmless, but it was
+  an error line on every run.
+
+**What would break it:**
+- Neon changing its free tier or suspending an inactive project. That shows up
+  as exit 6 on the next run, and the job's Failed execution is the signal
+  (Block 6's heartbeat).
+- Pointing a *local* Worker at Neon. It would mark nights `Sent` from a dev box
+  (D32). Locally, only `--migrate` and the admin API ever use `.env.neon`.
+
+**Proof (2026-10-30, first deploy with Block 4):**
+- `--migrate` from the dev box applied `InitialSchema` to Neon.
+- The location was added through the local admin API (201).
+- `deploy.sh` with image `786dd1b9d199`. Afterwards, `az containerapp job show`
+  lists:
+  - secrets `db-conn` and `ntfy-topic` only (the lat/lon secrets are gone);
+  - args `--once`;
+  - three env vars, two of them `secretRef`s.
+- **Idempotency in production:** with the rule's threshold at 0, execution
+  `job-precip-nightly-qkxvwuk` sent one notification (`Sent`, attempts 1). The
+  next start, `job-precip-nightly-hp5qhjv`, logged
+  `Location 1 (Home): already sent for night 2026-10-30.` and published
+  nothing. The phone got exactly one alert. The threshold was then set back to
+  50.
+
 #### D30. The admin API is local-only, behind an API key
 
 **Decision:** `src/Api` is a minimal API for managing locations and their
