@@ -53,8 +53,22 @@ public sealed class PostgresAlertLedgerTests(PostgresFixture postgres) : IAsyncL
         Assert.Equal(80, row.PeakProbability);
         Assert.Equal("Rain", row.Kind);
         Assert.Equal(Alert.Message().Title, row.Title);
+        Assert.Equal(Providers.Nws, row.Provider); // the assessment's default
         Assert.Null(row.LastError);
         Assert.True(await ledger.IsSentAsync(_locationId, Tonight.NightDate, Ct));
+    }
+
+    [Fact]
+    public async Task Send_records_the_provider_the_assessment_was_judged_on()
+    {
+        await using var ctx = _db.NewContext();
+        var ledger = new PostgresAlertLedger(ctx, new FakeAlertPublisher(), _clock);
+
+        await ledger.SendOnceAsync(
+            _locationId, Tonight.NightDate, Alert.Assessment(Tonight) with { Provider = Providers.OpenMeteo },
+            Alert.Message(), Ct);
+
+        Assert.Equal("Open-Meteo", (await _db.RowAsync(_locationId, Tonight.NightDate))!.Provider);
     }
 
     [Fact]

@@ -390,8 +390,15 @@ public sealed class NightlyPassTests(PostgresFixture postgres)
         var stale = await h.AddLocationAsync("stale", latitude: 40.7128m, longitude: -74.0060m);
         var incomplete = await h.AddLocationAsync("incomplete", threshold: 50, latitude: 40.7128m, longitude: -74.0060m);
         var publishFails = await h.AddLocationAsync("publish-fails", latitude: 40.7128m, longitude: -74.0060m);
+        var viaFallback = await h.AddLocationAsync("via-fallback", latitude: 40.7128m, longitude: -74.0060m);
 
+        // Both providers' failures quote the secret URL, as a careless client might; only the scrubber stands between it and the log.
         h.Cache.GetFailures[nwsFails] = new HttpRequestException("points down");
+        h.Cache.GetFailures[viaFallback] =
+            new HttpRequestException("GET https://api.weather.gov/points/40.7128,-74.006 failed");
+        h.Fallback.Handler = loc => loc.Id == viaFallback
+            ? FakeFallbackSource.OpenMeteo()
+            : throw new HttpRequestException("GET https://api.open-meteo.com/v1/forecast?latitude=40.7128&longitude=-74.006 failed");
         h.Forecasts.Handler = call =>
         {
             if (call.LocationId == stale && call.PointVersion == 1)
@@ -423,7 +430,11 @@ public sealed class NightlyPassTests(PostgresFixture postgres)
         // The topic was in play (the publisher saw it), and the run logged plenty to search.
         Assert.Contains(ok.Requests.Concat(failing.Requests), r => r.Contains(topic));
         Assert.True(h.Logs.Lines.Count > 20);
-        foreach (var name in new[] { "alert", "dry", "nws-fails", "stale", "incomplete", "publish-fails" })
+        // The fallback really answered for one location and failed for another, and its alert went out.
+        Assert.Contains(viaFallback, h.Fallback.Calls);
+        Assert.Contains(h.Ledger.SendCalls, c => c.LocationId == viaFallback);
+        Assert.Contains("both providers failed", h.Logs.AllText);
+        foreach (var name in new[] { "alert", "dry", "nws-fails", "stale", "incomplete", "publish-fails", "via-fallback" })
             Assert.Contains($"({name})", h.Logs.AllText);
 
         var text = h.Logs.AllText;

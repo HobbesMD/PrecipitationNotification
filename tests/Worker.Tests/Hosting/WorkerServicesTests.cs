@@ -1,10 +1,14 @@
 using System.Net;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Worker.Hosting;
 using Worker.Notifications;
 using Worker.Nws;
+using Worker.OpenMeteo;
 using Worker.Pass;
+using Worker.Resilience;
 using Worker.Tests.Pass;
 
 namespace Worker.Tests.Hosting;
@@ -21,10 +25,12 @@ public sealed class WorkerServicesTests
         UserAgent: UserAgent,
         ConnectionString: "Host=127.0.0.1;Port=1;Database=precip;Username=u;Password=pw;Pooling=false");
 
-    private static ServiceCollection NewServices(LogCapture logs, bool dryRun = false)
+    private static ServiceCollection NewServices(LogCapture logs, bool dryRun = false, IConfiguration? configuration = null)
     {
         var services = new ServiceCollection();
         services.AddLogging(b => b.ClearProviders().SetMinimumLevel(LogLevel.Trace).AddProvider(logs));
+        if (configuration is not null)
+            services.AddSingleton(configuration); // as the generic host does
         services.AddWorkerServices(Config, dryRun);
         return services;
     }
@@ -94,6 +100,82 @@ public sealed class WorkerServicesTests
 
         Assert.Equal($"POST https://ntfy.invalid/{Topic}", Assert.Single(handler.Requests));
         Assert.DoesNotContain(Topic, logs.AllText);
+    }
+
+    private static IConfiguration ConfigOf(params (string Key, string Value)[] values) =>
+        new ConfigurationBuilder()
+            .AddInMemoryCollection(values.Select(v => new KeyValuePair<string, string?>(v.Key, v.Value)))
+            .Build();
+
+    [Fact]
+    public async Task Clients_and_the_fallback_source_resolve()
+    {
+        await using var provider = NewServices(new LogCapture()).BuildServiceProvider(validateScopes: true);
+        await using var scope = provider.CreateAsyncScope();
+
+        Assert.NotNull(scope.ServiceProvider.GetRequiredService<NwsClient>());
+        Assert.NotNull(scope.ServiceProvider.GetRequiredService<OpenMeteoClient>());
+        Assert.IsType<OpenMeteoForecastSource>(scope.ServiceProvider.GetRequiredService<IFallbackForecastSource>());
+        Assert.IsType<NtfyPublisher>(scope.ServiceProvider.GetRequiredService<IAlertPublisher>());
+        Assert.Equal("https://api.open-meteo.com/", provider.GetRequiredService<OpenMeteoOptions>().BaseUrl);
+    }
+
+    [Fact]
+    public async Task Resilience_settings_default_when_nothing_is_configured()
+    {
+        await using var provider = NewServices(new LogCapture()).BuildServiceProvider();
+
+        foreach (var key in new[] { "nws", "open-meteo", "ntfy" })
+            Assert.Equal(new ResilienceSettings(), provider.GetRequiredKeyedService<ResilienceSettings>(key));
+        Assert.Equal(PassOptions.DefaultDeadline, provider.GetRequiredService<PassOptions>().Deadline);
+    }
+
+    [Fact]
+    public async Task Resilience_section_overrides_only_the_provider_it_names_and_only_the_keys_present()
+    {
+        var services = NewServices(new LogCapture(), configuration: ConfigOf(
+            ("Resilience:Nws:MaxAttempts", "5"),
+            ("Resilience:Ntfy:AttemptTimeout", "00:00:02")));
+        await using var provider = services.BuildServiceProvider();
+
+        var nws = provider.GetRequiredKeyedService<ResilienceSettings>("nws");
+        Assert.Equal(5, nws.MaxAttempts);
+        Assert.Equal(new ResilienceSettings { MaxAttempts = 5 }, nws); // everything else is the record default
+        Assert.Equal(new ResilienceSettings(), provider.GetRequiredKeyedService<ResilienceSettings>("open-meteo"));
+        Assert.Equal(
+            new ResilienceSettings { AttemptTimeout = TimeSpan.FromSeconds(2) },
+            provider.GetRequiredKeyedService<ResilienceSettings>("ntfy"));
+    }
+
+    [Fact]
+    public void The_generic_hosts_own_configuration_is_found_without_being_passed_in()
+    {
+        var builder = Host.CreateApplicationBuilder(new HostApplicationBuilderSettings { DisableDefaults = true });
+        builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Resilience:OpenMeteo:MaxAttempts"] = "7",
+            ["Worker:PassDeadline"] = "00:01:30",
+        });
+        builder.Services.AddWorkerServices(Config, dryRun: false);
+
+        using var host = builder.Build();
+
+        Assert.Equal(7, host.Services.GetRequiredKeyedService<ResilienceSettings>("open-meteo").MaxAttempts);
+        Assert.Equal(3, host.Services.GetRequiredKeyedService<ResilienceSettings>("nws").MaxAttempts);
+        Assert.Equal(TimeSpan.FromSeconds(90), host.Services.GetRequiredService<PassOptions>().Deadline);
+    }
+
+    [Theory]
+    [InlineData("soon")]
+    [InlineData("00:00:00")]
+    [InlineData("-00:01:00")]
+    public void A_bad_pass_deadline_fails_at_startup_without_echoing_it(string value)
+    {
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => NewServices(new LogCapture(), configuration: ConfigOf(("Worker:PassDeadline", value))));
+
+        Assert.Contains("Worker:PassDeadline", ex.Message);
+        Assert.DoesNotContain(value, ex.Message);
     }
 
     /// <summary>Returns 500 and keeps the headers of the last request.</summary>

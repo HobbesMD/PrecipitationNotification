@@ -53,8 +53,8 @@ later block. Repaid rows stay, struck through, so the history is visible.
 | ~~NWS gridpoint URL is re-fetched every run instead of cached.~~ *(Moved from Block 2: the cache belongs on the Location row, and a container has no persistent disk to cache on.)* | ✅ Block 4 ([D27](#d27-the-gridpoint-and-time-zone-are-cached-on-the-location-row)) |
 | Spring-forward test payload is hand-built (`tests/Fixtures/nws/synthetic-dst-springforward`). *(New in Block 2.)* | Real capture ~2027-03-08 |
 | ~~Coordinates and topic come from `.env` with no schema; only the window and threshold are validated.~~ Coordinates, window and threshold are now rows with schema constraints. The topic deliberately stays a job secret. | ✅ Block 4 ([D26](#d26-rules-and-coordinates-are-data-their-invariants-live-in-the-schema)) |
-| No retry, backoff, circuit breaker, or timeout tuning on the HTTP calls. | Block 5 |
-| ~~Single weather provider, no abstraction seam.~~ Seam exists ([D7](#d7-nws-responses-map-onto-provider-neutral-types-surprises-fail-loudly)); second provider not yet plugged in. | Block 5 |
+| ~~No retry, backoff, circuit breaker, or timeout tuning on the HTTP calls.~~ | ✅ Block 5 ([D33](#d33-every-forecast-get-runs-through-one-polly-pipeline-10-s-attempt-3-tries-30-s-total-a-breaker-per-provider), [D34](#d34-ntfy-is-retried-only-when-the-request-provably-never-arrived)) |
+| ~~Single weather provider, no abstraction seam.~~ ~~Seam exists ([D7](#d7-nws-responses-map-onto-provider-neutral-types-surprises-fail-loudly)); second provider not yet plugged in.~~ | ✅ Block 5 ([D36](#d36-open-meteo-is-the-fallback-a-fallback-night-keeps-the-same-key-and-says-where-it-came-from)) |
 | ~~No persistence and no idempotency — every run that clears the threshold sends a notification.~~ | ✅ Block 4 ([D25](#d25-one-alert-per-location-per-night-a-locked-row-at-least-once)) |
 | No tracing or metrics. | Block 6 |
 | Silence is ambiguous: "no precip" and "the job is dead" look identical. No heartbeat. | Block 6 |
@@ -64,6 +64,7 @@ later block. Repaid rows stay, struck through, so the history is visible.
 | Actions are pinned to major tags, not commit SHAs. Low risk while CI holds no secrets ([D24](#d24-review-deploysh-fails-closed)). *(New in Block 3.)* | Block 7 |
 | The admin API runs only on the dev box; it isn't deployed ([D30](#d30-the-admin-api-is-local-only-behind-an-api-key)). *(New in Block 4.)* | Block 7 |
 | One ntfy topic for every location. Per-location topics would mean storing a publish-capable secret in the database. *(New in Block 4.)* | Unscheduled |
+| The Open-Meteo capture is a dry week, so wet-night mapping is proven only with hand-built payloads ([D35](#d35-open-meteo-maps-onto-the-same-types-and-its-hours-end-at-their-timestamp)). *(New in Block 5.)* | Real wet capture, when one comes |
 
 ## Decision log
 
@@ -1401,3 +1402,53 @@ Each test asserts how many requests actually reached the server. The suite passe
 - `Wrong_units_throw_and_name_the_unit`, `Snowfall_centimetres_become_millimetres_of_depth`
 - `Freezing_rain_or_drizzle_hour_lands_in_ice`, `Weather_code_text_and_resulting_kind`
 - `Temperature_maps_only_when_fahrenheit`
+
+#### D36. Open-Meteo is the fallback; a fallback night keeps the same key and says where it came from
+
+**Decision:** NWS stays primary. `NightlyPass` falls back to Open-Meteo when the NWS path fails for **any reason except our own cancellation**: an HTTP error after retries, an open breaker, a timeout, bad JSON, a time-zone id the OS doesn't know, or a point that is still stale after D27's one refresh. Exit **2** now means *both* providers failed.
+
+**What does *not* trigger fallback:** a gridpoint-only failure. The hourly forecast alone decides the alert (D11), so NWS hours with "amounts unavailable" are still a good NWS answer.
+
+**Never mix providers within a night.** Hours and amounts both come from whichever provider answered. NWS probabilities with Open-Meteo amounts would be two models' opinions stitched together, and the message couldn't say which number came from where.
+
+**The night key must not change.** The idempotency key is `(location, night_date)`, and `night_date` depends on the zone (D2). The zone is the location's cached `time_zone_id` (D27), whichever provider answered. Only when NWS never resolved one does it come from Open-Meteo's `timezone=auto`. Both are IANA ids, so an NWS run and a fallback run for the same instant produce the same key, and D25 still prevents a second alert.
+
+**Provider recorded:**
+- `alert_history.provider` (migration `AddAlertProvider`) says which provider's forecast was sent.
+- A fallback alert's body ends with `Source: Open-Meteo (NWS unavailable)`. A different model can disagree with what the reader saw earlier, and they should know why. NWS alerts are unchanged.
+
+**Rejected:**
+- **Open-Meteo per location.** Unlocks non-US locations but doesn't help the one that exists.
+- **Primary plus fallback per location.** The most capable, and the most to test and explain.
+
+**Tests:** `NightlyPassFallbackTests`:
+- `Nws_http_failure_falls_back_and_the_alert_names_open_meteo`
+- `Open_circuit_goes_straight_to_the_fallback_without_refreshing_the_point`
+- `Still_stale_after_the_one_refresh_falls_back_and_exits_0`
+- `Both_providers_failing_exits_2_and_the_log_names_both`
+- `Gridpoint_only_failure_is_not_a_fallback_trigger`
+- `Cached_zone_wins_over_the_fallbacks_and_the_night_key_matches_an_nws_run`
+- `Our_own_cancellation_is_not_a_provider_failure_and_propagates`
+
+The D22 log guard now includes a fallback location whose errors quote a URL carrying the coordinates and topic. Nothing leaks.
+
+#### D37. A pass deadline that actually fits inside Azure's timeout: 100 s, exit 7
+
+**Decision:** before starting each location, `NightlyPass` checks how long the pass has run. Past **100 s**, it starts no more locations, logs each skipped one by id and name, and exits **7**, unless an earlier location already failed, whose code wins. Skipped locations are a failure, never a quiet 0: silence must not mean "not checked."
+
+**Why 100 s and not more:** the deadline only stops *new* locations. One location's worst case is six calls, each capped at 30 s by D33/D34: points, hourly and grid together, a stale refresh, the retried fetch, the Open-Meteo fallback, and ntfy. That's 180 s. A location started just before the deadline can run that long, so deadline + 180 s must stay under Azure's 300 s replica timeout: 100 + 180 = 280 s. A typical location takes 1–2 s, so 100 s still covers dozens.
+
+**Rejected:**
+- **240 s**, the first draft's number. It looked like headroom, but 240 + 180 = 420 s; Azure would kill the replica mid-location.
+- **240 s plus a hard cancel at 280 s.** It uses time better, but it cancels in-flight work, including possibly a send, and adds moving parts for a single-location job.
+- **No deadline.** D32 noted the per-location budget could reach the replica timeout with several locations, and then Azure, not the app, decides which location is cut off.
+
+**What would break it:** raising any pipeline's total timeout, the call count per location, or the deadline. The test `Deadline_plus_one_worst_case_location_ends_before_the_replica_timeout` recomputes the sum and fails if it crosses 280 s.
+
+**Tests:**
+- `Deadline_passing_during_location_1_means_location_2_is_not_started_and_the_exit_is_7`
+- `An_earlier_failure_keeps_its_code_when_the_deadline_then_passes`
+- `Deadline_is_measured_from_the_start_and_comes_from_the_options`
+- `Deadline_plus_one_worst_case_location_ends_before_the_replica_timeout`
+
+A malformed `Worker:PassDeadline` or `Resilience:*` value fails startup with exit 1, like every other config error.

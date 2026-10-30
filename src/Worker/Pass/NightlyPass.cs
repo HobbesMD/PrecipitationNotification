@@ -21,6 +21,7 @@ internal sealed class NightlyPass(
     PrecipDbContext db,
     IGridpointCache cache,
     IForecastSource forecasts,
+    IFallbackForecastSource fallback,
     IAlertLedger ledger,
     TimeProvider clock,
     PassOptions options,
@@ -63,9 +64,24 @@ internal sealed class NightlyPass(
         }
 
         var now = clock.GetUtcNow();
+        var started = clock.GetTimestamp();
         var firstFailure = ExitCodes.Ok;
+        var deadlinePassed = false;
         foreach (var location in locations)
         {
+            // Checked before starting a location, never in the middle of one: a location that has
+            // begun gets to finish (its own HTTP timeouts bound it), but a slow night must not
+            // start work the job's replica timeout will kill, since a killed replica loses the
+            // exit code and the log of what was skipped.
+            if (deadlinePassed || clock.GetElapsedTime(started) >= options.Deadline)
+            {
+                deadlinePassed = true;
+                log.LogError(
+                    "Location {LocationId} ({LocationName}): not evaluated (pass deadline of {Deadline} reached).",
+                    location.Id, location.Name, options.Deadline);
+                continue;
+            }
+
             int code;
             try
             {
@@ -84,6 +100,9 @@ internal sealed class NightlyPass(
                 firstFailure = code;
         }
 
+        if (deadlinePassed && firstFailure == ExitCodes.Ok)
+            return ExitCodes.PassDeadline;
+
         return firstFailure;
     }
 
@@ -97,8 +116,17 @@ internal sealed class NightlyPass(
             return ExitCodes.Failure;
         }
 
+        // ---- NWS first ----
+        // Any failure on this path except our own cancellation hands the location to the fallback
+        // provider (D33). The error is kept, not thrown, so the fallback decision sits in one place.
         NwsPoint point;
-        TimeZoneInfo zone;
+        TimeZoneInfo? zone = null;
+        NightWindow? resolved = null;
+        string? checkedZoneId = null;
+        ProviderForecast? forecast = null;
+        Exception? nwsError = null;
+        var nwsStage = "";
+
         try
         {
             point = await cache.GetAsync(location, ct);
@@ -107,61 +135,110 @@ internal sealed class NightlyPass(
         }
         catch (Exception ex) when (Failed(ex, ct))
         {
-            log.LogError(
-                "Location {LocationId} ({LocationName}): NWS point lookup failed: {Error}",
-                location.Id, location.Name, Describe(ex));
-            return ExitCodes.Nws;
+            zone = null;
+            nwsError = ex;
+            nwsStage = "NWS point lookup failed";
+            point = default!;
         }
 
-        var window = NightWindow.Resolve(now, zone, rule.WindowStart, rule.WindowEnd);
-
-        if (!options.DryRun)
+        if (zone is not null)
         {
+            resolved = NightWindow.Resolve(now, zone, rule.WindowStart, rule.WindowEnd);
+            if (await AlreadySentAsync(location, resolved, ct) is { } alreadyDone)
+                return alreadyDone;
+            checkedZoneId = zone.Id;
+
+            // Never log the coordinates: they pin a home, and stdout lands in Log Analytics in Azure.
+            log.LogInformation(
+                "Location {LocationId} ({LocationName}): fetching NWS forecast ...", location.Id, location.Name);
             try
             {
-                if (await ledger.IsSentAsync(location.Id, window.NightDate, ct))
+                try
                 {
-                    log.LogInformation(
-                        "Location {LocationId} ({LocationName}): already sent for night {NightDate:yyyy-MM-dd}.",
-                        location.Id, location.Name, window.NightDate);
-                    return ExitCodes.Ok;
+                    forecast = await forecasts.GetForecastAsync(point, ct);
+                }
+                catch (NwsPointStaleException)
+                {
+                    log.LogWarning(
+                        "Location {LocationId} ({LocationName}): cached NWS point is stale; refreshing once.",
+                        location.Id, location.Name);
+                    point = await cache.RefreshAsync(location, ct);
+                    forecast = await forecasts.GetForecastAsync(point, ct);
                 }
             }
             catch (Exception ex) when (Failed(ex, ct))
             {
-                log.LogError(
-                    "Location {LocationId} ({LocationName}): alert ledger unavailable: {Error}",
-                    location.Id, location.Name, Describe(ex));
-                return ExitCodes.Database;
+                nwsError = ex;
+                nwsStage = "NWS fetch failed";
             }
         }
 
-        // Never log the coordinates: they pin a home, and stdout lands in Log Analytics in Azure.
-        log.LogInformation(
-            "Location {LocationId} ({LocationName}): fetching NWS forecast ...", location.Id, location.Name);
-        ProviderForecast forecast;
-        try
+        // ---- Fallback ----
+        if (forecast is null)
         {
+            log.LogWarning(
+                "Location {LocationId} ({LocationName}): {Stage}: {Error}; trying the fallback provider.",
+                location.Id, location.Name, nwsStage, Describe(nwsError!));
+
+            // The cached zone is what keeps the night key stable across providers. When it is known
+            // the already-sent check can run before spending a fallback call.
+            var cachedZone = FindZone(location.TimeZoneId);
+            if (cachedZone is not null && cachedZone.Id != checkedZoneId)
+            {
+                resolved = NightWindow.Resolve(now, cachedZone, rule.WindowStart, rule.WindowEnd);
+                if (await AlreadySentAsync(location, resolved, ct) is { } alreadyDone)
+                    return alreadyDone;
+                checkedZoneId = cachedZone.Id;
+            }
+
+            log.LogInformation(
+                "Location {LocationId} ({LocationName}): fetching fallback forecast ...", location.Id, location.Name);
             try
             {
-                forecast = await forecasts.GetForecastAsync(point, ct);
+                forecast = await fallback.GetForecastAsync(location, ct);
             }
-            catch (NwsPointStaleException)
+            catch (Exception ex) when (Failed(ex, ct))
+            {
+                log.LogError(
+                    "Location {LocationId} ({LocationName}): both providers failed. {Stage}: {NwsError}; fallback fetch failed: {FallbackError}",
+                    location.Id, location.Name, nwsStage, Describe(nwsError!), Describe(ex));
+                return ExitCodes.Nws;
+            }
+
+            var forecastZone = FindZone(forecast.TimeZoneId);
+            if (cachedZone is not null && forecastZone is not null
+                && !string.Equals(cachedZone.Id, forecastZone.Id, StringComparison.Ordinal))
             {
                 log.LogWarning(
-                    "Location {LocationId} ({LocationName}): cached NWS point is stale; refreshing once.",
-                    location.Id, location.Name);
-                point = await cache.RefreshAsync(location, ct);
-                forecast = await forecasts.GetForecastAsync(point, ct);
+                    "Location {LocationId} ({LocationName}): fallback time zone {FallbackZone} differs from the cached {CachedZone}; using the cached one.",
+                    location.Id, location.Name, forecastZone.Id, cachedZone.Id);
             }
+
+            zone = cachedZone ?? forecastZone;
+            if (zone is null)
+            {
+                log.LogError(
+                    "Location {LocationId} ({LocationName}): both providers failed. {Stage}: {NwsError}; fallback returned a time zone this system does not know.",
+                    location.Id, location.Name, nwsStage, Describe(nwsError!));
+                return ExitCodes.Nws;
+            }
+
+            if (zone.Id != checkedZoneId)
+            {
+                resolved = NightWindow.Resolve(now, zone, rule.WindowStart, rule.WindowEnd);
+                if (await AlreadySentAsync(location, resolved, ct) is { } alreadyDone)
+                    return alreadyDone;
+                checkedZoneId = zone.Id;
+            }
+
+            log.LogWarning(
+                "Location {LocationId} ({LocationName}): using {Provider} forecast.",
+                location.Id, location.Name, forecast.Provider);
         }
-        catch (Exception ex) when (Failed(ex, ct))
-        {
-            log.LogError(
-                "Location {LocationId} ({LocationName}): NWS fetch failed: {Error}",
-                location.Id, location.Name, Describe(ex));
-            return ExitCodes.Nws;
-        }
+
+        // Every path that reaches here has resolved a zone and checked its window.
+        var window = resolved!;
+        var localZone = zone!;
 
         log.LogInformation("Got {Count} hourly periods.", forecast.Hours.Count);
         if (forecast.Amounts is null)
@@ -172,7 +249,8 @@ internal sealed class NightlyPass(
         try
         {
             assessment = ForecastEvaluator.Evaluate(
-                window, forecast.Hours, forecast.Amounts, new Forecast.AlertRule(rule.ProbabilityThreshold), now);
+                window, forecast.Hours, forecast.Amounts, new Forecast.AlertRule(rule.ProbabilityThreshold), now)
+                with { Provider = forecast.Provider };
         }
         catch (IncompleteForecastException ex)
         {
@@ -188,7 +266,7 @@ internal sealed class NightlyPass(
                 "No hourly data {GapStart:o} -> {GapEnd:o}; alerting on the hours we have.", gap.StartUtc, gap.EndUtc);
 
         var hoursInWindow = forecast.Hours.Count(h => h.Start < window.EndUtc && h.End > window.StartUtc);
-        log.LogInformation("Time zone: {TimeZone}", zone.Id);
+        log.LogInformation("Time zone: {TimeZone}", localZone.Id);
         log.LogInformation(
             "Night {NightDate:yyyy-MM-dd}: {WindowStart:o} -> {WindowEnd:o} (length {Length})",
             window.NightDate, window.StartUtc, window.EndUtc, window.Length);
@@ -211,7 +289,7 @@ internal sealed class NightlyPass(
             assessment.SnowInches.ToString("0.00", Inv),
             assessment.IceInches.ToString("0.00", Inv));
 
-        var msg = NotificationComposer.Compose(assessment, zone);
+        var msg = NotificationComposer.Compose(assessment, localZone);
 
         if (options.DryRun)
         {
@@ -252,6 +330,49 @@ internal sealed class NightlyPass(
         }
 
         return ExitCodes.Ok;
+    }
+
+    /// <summary>
+    /// Null when the night is not yet sent (or this is a dry run, which never asks); otherwise the
+    /// exit code to return: Ok for an already-sent night, Database when the ledger can't be read.
+    /// </summary>
+    private async Task<int?> AlreadySentAsync(Location location, NightWindow window, CancellationToken ct)
+    {
+        if (options.DryRun)
+            return null;
+
+        try
+        {
+            if (!await ledger.IsSentAsync(location.Id, window.NightDate, ct))
+                return null;
+
+            log.LogInformation(
+                "Location {LocationId} ({LocationName}): already sent for night {NightDate:yyyy-MM-dd}.",
+                location.Id, location.Name, window.NightDate);
+            return ExitCodes.Ok;
+        }
+        catch (Exception ex) when (Failed(ex, ct))
+        {
+            log.LogError(
+                "Location {LocationId} ({LocationName}): alert ledger unavailable: {Error}",
+                location.Id, location.Name, Describe(ex));
+            return ExitCodes.Database;
+        }
+    }
+
+    /// <summary>The zone for an IANA id, or null when the id is missing or this system doesn't know it.</summary>
+    private static TimeZoneInfo? FindZone(string? id)
+    {
+        if (string.IsNullOrEmpty(id))
+            return null;
+        try
+        {
+            return TimeZoneInfo.FindSystemTimeZoneById(id);
+        }
+        catch (Exception ex) when (ex is TimeZoneNotFoundException or InvalidTimeZoneException)
+        {
+            return null;
+        }
     }
 
     /// <summary>True unless the failure is just the host shutting down, which must propagate.</summary>

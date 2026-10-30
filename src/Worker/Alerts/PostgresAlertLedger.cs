@@ -120,7 +120,8 @@ internal sealed class PostgresAlertLedger(PrecipDbContext db, IAlertPublisher pu
                 last_attempt_at = {sentAt},
                 peak_probability = {assessment.PeakProbability},
                 kind = {assessment.Kind.ToString()},
-                title = {msg.Title}
+                title = {msg.Title},
+                provider = {assessment.Provider}
             WHERE id = {row.Id}
             """,
             CancellationToken.None);

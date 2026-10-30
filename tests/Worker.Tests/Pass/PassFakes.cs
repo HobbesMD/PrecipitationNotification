@@ -63,6 +63,29 @@ internal sealed class FakeForecastSource : IForecastSource
     }
 }
 
+/// <summary>
+/// The fallback provider. By default it is down (throws), so a test that doesn't care about the
+/// fallback sees the NWS failure's exit code, as before Block 5.
+/// </summary>
+internal sealed class FakeFallbackSource : IFallbackForecastSource
+{
+    /// <summary>The location ids the fallback was asked about, in order.</summary>
+    public List<int> Calls { get; } = [];
+
+    public Func<Location, ProviderForecast> Handler { get; set; } =
+        _ => throw new HttpRequestException("fallback down");
+
+    /// <summary>The captured forecast relabelled as Open-Meteo, in the given zone.</summary>
+    public static ProviderForecast OpenMeteo(string timeZoneId = "America/New_York") =>
+        FixtureForecast.Full() with { Provider = Providers.OpenMeteo, TimeZoneId = timeZoneId };
+
+    public Task<ProviderForecast> GetForecastAsync(Location location, CancellationToken ct)
+    {
+        Calls.Add(location.Id);
+        return Task.FromResult(Handler(location));
+    }
+}
+
 /// <summary>An in-memory idempotency key set. The real one is the database's unique index.</summary>
 internal sealed class FakeAlertLedger : IAlertLedger
 {
@@ -71,6 +94,9 @@ internal sealed class FakeAlertLedger : IAlertLedger
     public List<(int LocationId, DateOnly Night)> IsSentCalls { get; } = [];
 
     public List<(int LocationId, DateOnly Night, ComposedMessage Message)> SendCalls { get; } = [];
+
+    /// <summary>The assessment of each <see cref="SendOnceAsync"/> call, parallel to <see cref="SendCalls"/>.</summary>
+    public List<NightAssessment> Assessments { get; } = [];
 
     public int TotalCalls => IsSentCalls.Count + SendCalls.Count;
 
@@ -87,6 +113,7 @@ internal sealed class FakeAlertLedger : IAlertLedger
         int locationId, DateOnly nightDate, NightAssessment assessment, ComposedMessage msg, CancellationToken ct)
     {
         SendCalls.Add((locationId, nightDate, msg));
+        Assessments.Add(assessment);
         if (Sent.Contains((locationId, nightDate)))
             return SendOutcome.AlreadySent;
 

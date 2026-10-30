@@ -17,5 +17,5 @@ internal interface IFallbackForecastSource
 internal sealed class OpenMeteoForecastSource(OpenMeteoClient client) : IFallbackForecastSource
 {
     public Task<ProviderForecast> GetForecastAsync(Persistence.Location location, CancellationToken ct) =>
-        throw new NotImplementedException();
+        client.GetForecastAsync(location.Latitude, location.Longitude, ct);
 }

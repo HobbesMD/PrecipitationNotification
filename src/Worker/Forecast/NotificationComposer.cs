@@ -112,9 +112,16 @@ internal static class NotificationComposer
             sb.Append('\n').Append(label).Append(": ");
             if (hit.PrecipProbability is { } p)
                 sb.Append(p.ToString(Inv)).Append("%, ");
-            sb.Append(hit.ShortForecast).Append(", ")
-              .Append(hit.Temperature.ToString(Inv)).Append(' ').Append(hit.TemperatureUnit);
+            sb.Append(hit.ShortForecast);
+            // An empty unit means the provider gave no usable temperature (D35): omit it, never print a fake 0.
+            if (hit.TemperatureUnit.Length > 0)
+                sb.Append(", ").Append(hit.Temperature.ToString(Inv)).Append(' ').Append(hit.TemperatureUnit);
         }
+
+        // Say so when the numbers didn't come from NWS: a different model can disagree with the
+        // forecast the reader saw earlier, and they should know why.
+        if (a.Provider != Providers.Nws)
+            sb.Append('\n').Append("Source: ").Append(a.Provider).Append(" (NWS unavailable)");
 
         return sb.ToString();
     }
