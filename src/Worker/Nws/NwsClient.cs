@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using Worker.Forecast;
 
 namespace Worker.Nws;
 
@@ -18,9 +19,9 @@ namespace Worker.Nws;
 ///
 /// No retry/backoff here: that's Block 5.
 /// </summary>
-internal sealed class NwsClient(HttpClient http)
+internal sealed class NwsClient(HttpClient http, NwsOptions options)
 {
-    private const string PointsBase = "https://api.weather.gov/points/";
+    private readonly string _pointsBase = options.BaseUrl + "points/";
 
     /// <summary>
     /// The <c>/points</c> lookup alone, for <see cref="IGridpointCache"/> to store.
@@ -30,7 +31,7 @@ internal sealed class NwsClient(HttpClient http)
     /// </summary>
     public async Task<NwsPoint> ResolvePointAsync(string latLon, CancellationToken ct)
     {
-        var point = await http.GetFromJsonAsync<PointResponse>(PointsBase + latLon, ct)
+        var point = await http.GetFromJsonAsync<PointResponse>(_pointsBase + latLon, ct)
             ?? throw new InvalidOperationException("NWS /points returned an empty body.");
         var props = point.Properties
             ?? throw new InvalidOperationException("NWS /points response had no properties.");
@@ -50,7 +51,7 @@ internal sealed class NwsClient(HttpClient http)
     /// answers 404, so the caller can refresh the point and retry; any other non-2xx throws
     /// <see cref="HttpRequestException"/>.
     /// </summary>
-    public async Task<NwsForecast> GetForecastAsync(NwsPoint point, CancellationToken ct)
+    public async Task<ProviderForecast> GetForecastAsync(NwsPoint point, CancellationToken ct)
     {
         // Independent requests; no reason to serialize them.
         var hourlyTask = GetHourlyAsync(point.ForecastHourlyUrl, ct);

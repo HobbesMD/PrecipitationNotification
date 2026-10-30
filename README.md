@@ -382,7 +382,7 @@ rain night sent *nothing*.
 - If the gridpoint fetch fails (HTTP error, timeout, bad JSON, empty body, no
   `forecastGridData` URL) or its data can't be trusted (a series absent, a unit
   other than mm, a malformed `validTime`), amounts become **unavailable**:
-  `NwsForecast.Amounts` is null and carries a reason. The run logs a warning
+  `NwsForecast.Amounts` (`ProviderForecast.Amounts` since Block 5) is null and carries a reason. The run logs a warning
   and the message says "Amounts unavailable from NWS."
 - A series that is *present but empty* is still genuine zero.
 - Points and hourly failures still fail the run (exit 2).

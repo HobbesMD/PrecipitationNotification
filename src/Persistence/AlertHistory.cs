@@ -50,6 +50,13 @@ public sealed class AlertHistory
     public string? Title { get; set; }
 
     /// <summary>
+    /// Which weather provider the alert was based on ("NWS" or "Open-Meteo"). Nullable so the
+    /// migration is a plain <c>ADD COLUMN</c> with no default or backfill: rows written before
+    /// Block 5 simply have none recorded.
+    /// </summary>
+    public string? Provider { get; set; }
+
+    /// <summary>
     /// Why the last attempt failed. Must never contain the ntfy topic, a coordinate
     /// or a connection string: it is stored and may be shown by the API.
     /// </summary>

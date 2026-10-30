@@ -54,7 +54,7 @@ public sealed class DbGridpointCacheTests(PostgresFixture postgres)
             [GridUrl] = Json(FixtureFiles.Read(Dir + "gridpoint.json")),
         });
 
-    private static NwsClient Client(CountingHandler handler) => new(new HttpClient(handler));
+    private static NwsClient Client(CountingHandler handler) => new(new HttpClient(handler), new NwsOptions());
 
     private static DbGridpointCache Cache(PrecipDbContext db, CountingHandler handler) =>
         new(db, Client(handler), new FixedClock(Now));

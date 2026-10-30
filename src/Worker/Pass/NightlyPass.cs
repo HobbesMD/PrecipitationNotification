@@ -139,7 +139,7 @@ internal sealed class NightlyPass(
         // Never log the coordinates: they pin a home, and stdout lands in Log Analytics in Azure.
         log.LogInformation(
             "Location {LocationId} ({LocationName}): fetching NWS forecast ...", location.Id, location.Name);
-        NwsForecast forecast;
+        ProviderForecast forecast;
         try
         {
             try

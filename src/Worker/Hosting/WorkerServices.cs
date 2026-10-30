@@ -37,6 +37,7 @@ internal static class WorkerServices
             options.EnableSensitiveDataLogging(false);
         });
 
+        services.AddSingleton(new NwsOptions());
         services.AddHttpClient<NwsClient>(http =>
         {
             http.Timeout = HttpTimeout;

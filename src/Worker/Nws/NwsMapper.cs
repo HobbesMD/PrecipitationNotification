@@ -13,7 +13,7 @@ internal static class NwsMapper
     /// rather than throwing or guessing zero. The zone comes from <paramref name="point"/>;
     /// a point without one can't exist, because <c>NwsClient.ResolvePointAsync</c> throws first.
     /// </summary>
-    public static NwsForecast ToForecast(
+    public static ProviderForecast ToForecast(
         NwsPoint point,
         IReadOnlyList<ForecastPeriod> periods,
         GridpointProperties? grid,
@@ -28,10 +28,10 @@ internal static class NwsMapper
             p.TemperatureUnit ?? "F")).ToList();
 
         if (amountsUnavailableReason is not null)
-            return new NwsForecast(point.TimeZoneId, hours, null, amountsUnavailableReason);
+            return new ProviderForecast(Providers.Nws, point.TimeZoneId, hours, null, amountsUnavailableReason);
 
         var amounts = TryMapAmounts(grid, out var reason);
-        return new NwsForecast(point.TimeZoneId, hours, amounts, reason);
+        return new ProviderForecast(Providers.Nws, point.TimeZoneId, hours, amounts, reason);
     }
 
     private static PrecipAmounts? TryMapAmounts(GridpointProperties? grid, out string? reason)

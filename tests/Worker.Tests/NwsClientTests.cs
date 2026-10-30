@@ -1,4 +1,5 @@
 using System.Net;
+using Worker.Forecast;
 using Worker.Nws;
 
 namespace Worker.Tests;
@@ -39,10 +40,10 @@ public class NwsClientTests
             [PointsUrl] = points ?? Json(FixtureFiles.Read(Dir + "points.json")),
             [HourlyUrl] = hourly ?? Json(FixtureFiles.Read(Dir + "forecast-hourly.json")),
             [GridUrl] = grid ?? Json(FixtureFiles.Read(Dir + "gridpoint.json")),
-        })));
+        })), new NwsOptions());
 
     // Resolve then fetch, as the nightly pass does on a cold cache.
-    private static async Task<NwsForecast> Get(NwsClient client, CancellationToken? ct = null)
+    private static async Task<ProviderForecast> Get(NwsClient client, CancellationToken? ct = null)
     {
         var token = ct ?? TestContext.Current.CancellationToken;
         var point = await client.ResolvePointAsync("40.7128,-74.0060", token);

@@ -50,9 +50,9 @@ internal sealed class FakeForecastSource : IForecastSource
     public List<FetchCall> Calls { get; } = [];
 
     /// <summary>Default: the full captured forecast.</summary>
-    public Func<FetchCall, NwsForecast> Handler { get; set; } = _ => FixtureForecast.Full();
+    public Func<FetchCall, ProviderForecast> Handler { get; set; } = _ => FixtureForecast.Full();
 
-    public Task<NwsForecast> GetForecastAsync(NwsPoint point, CancellationToken ct)
+    public Task<ProviderForecast> GetForecastAsync(NwsPoint point, CancellationToken ct)
     {
         var parts = new Uri(point.ForecastHourlyUrl).AbsolutePath.Trim('/').Split('/');
         var id = int.Parse(parts[0]);
@@ -147,7 +147,7 @@ internal static class FixtureForecast
     private const string Dir = "nws/2026-10-29T1900Z_pre-dst-fallback/";
 
     /// <summary>All 156 hours, 2026-10-29 14:00 EDT onward. Every PoP is under 50.</summary>
-    public static NwsForecast Full()
+    public static ProviderForecast Full()
     {
         var points = FixtureFiles.Load<PointResponse>(Dir + "points.json");
         var hourly = FixtureFiles.Load<HourlyForecastResponse>(Dir + "forecast-hourly.json");
@@ -158,7 +158,7 @@ internal static class FixtureForecast
     }
 
     /// <summary>The forecast cut off: no hours starting at or after <paramref name="cut"/>.</summary>
-    public static NwsForecast Truncated(DateTimeOffset cut)
+    public static ProviderForecast Truncated(DateTimeOffset cut)
     {
         var full = Full();
         return full with { Hours = full.Hours.Where(h => h.Start < cut).ToList() };
