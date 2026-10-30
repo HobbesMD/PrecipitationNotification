@@ -832,3 +832,63 @@ the `.env.example` files.
 **Not changed:** actions are pinned to major version tags rather than commit
 SHAs. The workflow uses no secrets and a read-only token, so a compromised
 action has little to steal. Revisit in Block 7, when CI gets push credentials.
+
+### Block 4: persistence + API
+
+#### D26. Rules and coordinates are data; their invariants live in the schema
+
+**Decision:** locations, their alert rules and the alert history move into
+Postgres (`src/Persistence`, EF Core + Npgsql, snake_case names). Every rule
+that used to be an env-var check is now a **database constraint**, so any
+writer is held to it, whether that's the API, a `psql` session or a future job:
+- `alert_rules.probability_threshold` CHECK 0–100 (was D14's startup check).
+- `alert_rules` CHECK `window_start > window_end`, so the window must cross
+  midnight (was D5's).
+- `locations.latitude numeric(6,4)` CHECK ±90, `longitude numeric(7,4)` CHECK
+  ±180. Four decimal places is the NWS limit, so the column type makes it
+  structural.
+- `alert_history` UNIQUE `(location_id, night_date)`, named
+  `ux_alert_history_location_night`. This is the idempotency key from the
+  brief; how sends use it is D25.
+- `night_date` is a Postgres `date` (`DateOnly`), with no time and no zone. It's
+  D2's local "night the window starts on," and storing it as a timestamp would
+  invite exactly the UTC-date bug D2 guards against.
+
+The same rules are checked first in code by `AlertRuleValidation`, so a caller
+gets a message naming the field rather than a constraint violation. The
+database is the backstop, not the only line.
+
+**Coordinates:**
+- A fifth decimal place is **rejected, not rounded**. Rounding silently moves
+  the point by up to ~5 m, which makes it a different location.
+- Errors name the field but never the value (D22). The exception isn't even
+  given the value as `actualValue`, because it would print it.
+- Coordinates are immutable once stored: to move, create a new location. The
+  gridpoint cached on the row (D27) then can't go stale through an edit.
+
+**Deletes:** removing a location cascades to its rule but is **restricted** by
+its alert history. What was sent is never erased as a side effect.
+
+**Rejected:**
+- Validating only in C#. Each new writer would need to remember the rules.
+- `EnsureCreated` instead of migrations. The tests would then run against EF's
+  idea of the schema instead of the one production gets (see the fixture below).
+- Storing `night_date` as `timestamptz`.
+
+**What would break it:** a raw-SQL writer that sidesteps EF is fine, since the
+constraints still hold. What breaks it is a migration that drops or renames
+the unique index. The ledger (D25) depends on its name.
+
+**Tests:**
+- `AlertRuleValidationTests`: D5, D14 and D22's cases, moved from
+  `AppConfigTests`. Every coordinate rejection asserts the digits are absent
+  from the message.
+- `SchemaSmokeTests` (in both test projects) run against **real Postgres 17**
+  in Testcontainers. A second `alert_history` row for the same location and
+  night, inserted with raw SQL that bypasses all app code, fails with SQLSTATE
+  23505 on `ux_alert_history_location_night`. A threshold of 101 fails with
+  23514. The point is that the *database* refuses.
+- The fixture (`tests/Shared/PostgresFixture.cs`) applies the real migrations
+  once to a template database and gives each test class its own copy
+  (`CREATE DATABASE … TEMPLATE`). So every DB test also proves the migrations
+  build the schema.

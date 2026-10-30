@@ -1,4 +1,4 @@
-namespace Worker;
+namespace Persistence;
 
 /// <summary>
 /// Minimal .env loader for the Block 1 walking skeleton. Walks up from the
@@ -8,8 +8,11 @@ namespace Worker;
 /// Deliberately tiny: no quoting rules beyond stripping one pair of surrounding
 /// double quotes, no variable expansion, no export syntax. Block 2+ config comes
 /// from real configuration providers.
+///
+/// Lives in Persistence, the one project every host references, so the Worker,
+/// the API and local tooling load <c>.env</c> the same way.
 /// </summary>
-internal static class DotEnv
+public static class DotEnv
 {
     public static string? Load(int maxDepth = 6)
     {

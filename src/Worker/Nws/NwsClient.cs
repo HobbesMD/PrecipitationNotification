@@ -45,6 +45,22 @@ internal sealed class NwsClient(HttpClient http)
     }
 
     /// <summary>
+    /// The <c>/points</c> lookup alone, for <see cref="IGridpointCache"/> to store.
+    /// <paramref name="latLon"/> is <c>lat,lon</c> with at most 4 decimal places; it is
+    /// secret (D22), so neither it nor the URL may appear in an exception message.
+    /// </summary>
+    public Task<NwsPoint> ResolvePointAsync(string latLon, CancellationToken ct) =>
+        throw new NotImplementedException();
+
+    /// <summary>
+    /// Hourly forecast + gridpoint amounts from an already-resolved <paramref name="point"/>,
+    /// skipping <c>/points</c>. Throws <see cref="NwsPointStaleException"/> when the cached
+    /// URLs no longer work, so the caller can refresh the point and retry.
+    /// </summary>
+    public Task<NwsForecast> GetForecastAsync(NwsPoint point, CancellationToken ct) =>
+        throw new NotImplementedException();
+
+    /// <summary>
     /// Never throws for a bad gridpoint: failures come back as a reason string. A timeout surfaces
     /// as <see cref="TaskCanceledException"/> without <paramref name="ct"/> being cancelled; real
     /// cancellation is not caught and propagates.

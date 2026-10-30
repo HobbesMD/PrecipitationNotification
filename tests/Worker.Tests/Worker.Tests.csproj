@@ -10,6 +10,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Worker\Worker.csproj" />
+    <ProjectReference Include="..\..\src\Persistence\Persistence.csproj" />
   </ItemGroup>
 
   <ItemGroup>
@@ -21,8 +22,15 @@
   <ItemGroup>
     <None Include="..\Fixtures\**\*" LinkBase="Fixtures" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
+
+  <!-- Source shared with Api.Tests; each test assembly starts its own container. -->
+  <ItemGroup>
+    <Compile Include="..\Shared\PostgresFixture.cs" Link="Shared\PostgresFixture.cs" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="xunit.v3" Version="4.0.2" />
+    <PackageReference Include="Testcontainers.PostgreSql" Version="4.16.0" />
   </ItemGroup>
 
 </Project>

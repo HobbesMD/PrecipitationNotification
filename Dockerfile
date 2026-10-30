@@ -11,8 +11,10 @@ WORKDIR /src
 # Restore first so the layer is cached until the project file changes.
 COPY global.json ./
 COPY src/Worker/Worker.csproj src/Worker/
+COPY src/Persistence/Persistence.csproj src/Persistence/
 RUN dotnet restore src/Worker/Worker.csproj
 
+COPY src/Persistence/ src/Persistence/
 COPY src/Worker/ src/Worker/
 RUN dotnet publish src/Worker/Worker.csproj -c Release -o /app --no-restore /p:UseAppHost=false
 

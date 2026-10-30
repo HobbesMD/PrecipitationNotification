@@ -21,15 +21,17 @@ if (args.Contains("--self-check")) return RuntimeSelfCheck.Run(Console.Out);
 var dryRun = args.Contains("--dry-run");
 var inv = CultureInfo.InvariantCulture;
 
-var envFile = DotEnv.Load();
+var envFile = Persistence.DotEnv.Load();
 Console.WriteLine(envFile is null
     ? "No .env file found; relying on process environment."
     : $"Loaded config from {envFile}");
 
-AppConfig config;
+// Block 4 interim: AppConfig now requires the database, which this flow doesn't use
+// yet, so the pre-database settings are read here until the nightly pass replaces it.
+LegacyConfig config;
 try
 {
-    config = AppConfig.FromEnvironment();
+    config = LegacyConfig.FromEnvironment();
 }
 catch (Exception ex)
 {
@@ -132,3 +134,88 @@ catch (Exception ex)
 Console.WriteLine(
     $"Sent notification (peak {assessment.PeakProbability}%, {assessment.Hits.Count} hour(s) over threshold).");
 return 0;
+
+
+/// <summary>
+/// Block 4 interim: the pre-database configuration for the single hardcoded
+/// location, read from the environment exactly as before Block 4 (same variables,
+/// same defaults), now validated by <see cref="Persistence.AlertRuleValidation"/>. Goes away
+/// when the nightly pass reads locations from the database.
+/// </summary>
+file sealed record LegacyConfig(
+    decimal Lat,
+    decimal Lon,
+    string NtfyBaseUrl,
+    string NtfyTopic,
+    string UserAgent,
+    TimeOnly WindowStart,
+    TimeOnly WindowEnd,
+    int ProbabilityThreshold)
+{
+    public static LegacyConfig FromEnvironment()
+    {
+        var windowStart = ParseTime("PRECIP_WINDOW_START", "20:00");
+        var windowEnd = ParseTime("PRECIP_WINDOW_END", "07:00");
+        Persistence.AlertRuleValidation.ValidateWindow(windowStart, windowEnd);
+
+        return new(
+            Lat: ParseCoordinate("PRECIP_LAT", Persistence.AlertRuleValidation.LatitudeLimit),
+            Lon: ParseCoordinate("PRECIP_LON", Persistence.AlertRuleValidation.LongitudeLimit),
+            NtfyBaseUrl: Optional("PRECIP_NTFY_BASE_URL", "https://ntfy.sh"),
+            NtfyTopic: Require("PRECIP_NTFY_TOPIC"),
+            UserAgent: Require("PRECIP_USER_AGENT"),
+            WindowStart: windowStart,
+            WindowEnd: windowEnd,
+            ProbabilityThreshold: ParseThreshold());
+    }
+
+    /// <summary>NWS rejects coordinates with more than 4 decimal places.</summary>
+    public string LatLon => FormattableString.Invariant($"{Lat:0.####},{Lon:0.####}");
+
+    /// <summary>Never prints the coordinates or the topic (D22).</summary>
+    public override string ToString() => "LegacyConfig { (redacted) }";
+
+    private const string ThresholdKey = "PRECIP_PROBABILITY_THRESHOLD";
+
+    /// <summary>Unset or empty means 50; anything else must be an integer 0–100 (D14).</summary>
+    private static int ParseThreshold()
+    {
+        var raw = Environment.GetEnvironmentVariable(ThresholdKey);
+        if (string.IsNullOrEmpty(raw))
+            return 50;
+
+        if (!int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var value))
+            throw new InvalidOperationException(
+                $"{ThresholdKey} must be an integer from 0 to 100, but was '{raw}'.");
+
+        Persistence.AlertRuleValidation.ValidateThreshold(value);
+        return value;
+    }
+
+    /// <summary>Names the variable, never the value: coordinates are secret (D22).</summary>
+    private static decimal ParseCoordinate(string key, decimal limit)
+    {
+        var raw = Environment.GetEnvironmentVariable(key);
+        if (string.IsNullOrEmpty(raw))
+            throw new InvalidOperationException($"Missing required environment variable {key}.");
+
+        // Float, not Number: no thousands separators, so 12,3456 can't become 123456.
+        if (!decimal.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out var value))
+            throw new InvalidOperationException(
+                $"{key} must be decimal degrees, e.g. 40.7128 (value not shown: coordinates are secret).");
+
+        Persistence.AlertRuleValidation.ValidateCoordinate(key, value, limit);
+        return value;
+    }
+
+    private static string Require(string key) =>
+        Environment.GetEnvironmentVariable(key) is { Length: > 0 } v
+            ? v
+            : throw new InvalidOperationException($"Missing required environment variable {key}.");
+
+    private static string Optional(string key, string fallback) =>
+        Environment.GetEnvironmentVariable(key) is { Length: > 0 } v ? v : fallback;
+
+    private static TimeOnly ParseTime(string key, string fallback) =>
+        TimeOnly.Parse(Optional(key, fallback), CultureInfo.InvariantCulture);
+}
