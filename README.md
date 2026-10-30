@@ -1319,3 +1319,32 @@ What it confirmed, with evidence:
   `--migrate` and the API against Neon, never a send.
 - **Exit 6 has two causes.** It now covers "not ready" at startup *and* a
   database failure mid-send. Both mean "look at the database."
+
+### Block 5: resilience + second provider
+
+#### D33. Every forecast GET runs through one Polly pipeline: 10 s attempt, 3 tries, 30 s total, a breaker per provider
+
+**Decision:** `AddGetResilience` (Polly v8 via `Microsoft.Extensions.Http.Resilience`) wraps the NWS and Open-Meteo clients. Strategies, outermost first:
+1. **Total timeout, 30 s.** A hard cap per call, whatever happens inside.
+2. **Retry: 3 attempts in total**, exponential backoff with jitter (1 s base). It retries 5xx, 408, 429, connection failures and an attempt timeout. It **never retries a 404 or any other 4xx**: D27's stale-point refresh has to see the 404 at once, and a retried 400 would just fail three times.
+3. **Circuit breaker, one per provider.** It opens when at least half of at least 4 calls in a 30 s window fail, and stays open for 30 s. While open, calls fail instantly with `BrokenCircuitException` and nothing reaches the network.
+4. **Attempt timeout, 10 s.** One slow response can't eat the whole budget.
+
+`HttpClient.Timeout` is set to infinite on these clients, so the pipeline owns every timeout and there are no two clocks to reason about. All numbers live in `ResilienceSettings`, bound from config (`Resilience:Nws`, `Resilience:OpenMeteo`), so tests run the same pipeline with millisecond timings.
+
+**Why the breaker, in a once-a-night job:** in `--once` mode its state dies with the process, so it does **not** remember last night's outage. What it does: within one pass, once NWS has failed enough to trip it, every later location skips NWS instantly and goes straight to Open-Meteo (D36), instead of spending 30 s each re-discovering that NWS is down. The hourly local loop (D31) keeps it across passes. Persisting breaker state in Postgres was rejected as machinery for one run a night.
+
+**Rejected:**
+- **`AddStandardResilienceHandler` defaults.** Close to these numbers, but defaults aren't decisions, and it brings hedging and breaker settings nobody chose.
+- **A tighter 5 s / 2 tries.** NWS is sometimes several seconds slow while healthy; that would turn slow into failed.
+
+**Behavior worth knowing:** when retries run out on a status code (say, three 500s), the pipeline returns the last response rather than throwing. `NwsClient` turns it into an exception, as before. The breaker counts the attempts of every call: three failed attempts on one call plus one on the next trip it, so the second call's retry gets `BrokenCircuitException` immediately.
+
+**Tests:** `GetResilienceTests`, against WireMock.Net (a real HTTP server in-process, so the real handler chain runs):
+- `Two_503s_then_200_succeeds_after_exactly_3_requests`
+- `A_404_is_returned_after_exactly_1_request`, `A_400_is_not_retried`
+- `A_response_slower_than_the_attempt_timeout_is_retried`
+- `The_total_timeout_cuts_retries_short_when_it_is_shorter_than_the_attempts`
+- `Open_breaker_rejects_with_0_requests_and_a_successful_probe_closes_it`
+
+Each test asserts how many requests actually reached the server. The suite passed three consecutive full runs before commit.
