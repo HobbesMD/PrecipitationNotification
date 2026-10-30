@@ -13,23 +13,32 @@ that prove it.
 
 ```
 cp .env.example .env   # then fill in real values
-dotnet run --project src/Worker              # evaluate tonight, notify if needed
-dotnet run --project src/Worker -- --dry-run # print the message, don't send it
-dotnet test
+docker compose up -d                                     # local Postgres 17
+dotnet run --project src/Worker -- --migrate             # apply EF migrations (never automatic)
+dotnet run --project src/Api                             # admin API: POST /locations (X-Api-Key)
+dotnet run --project src/Worker -- --once                # one pass over every active location
+dotnet run --project src/Worker -- --once --dry-run      # print the message, don't send or record it
+dotnet run --project src/Worker                          # long-running: a pass now, then every Worker__Interval
+dotnet test                                              # DB tests need Docker (Testcontainers)
 
 docker build -t precip .
 docker run --rm precip --self-check                # image has real time-zone data? (exit 0/5)
-docker run --rm --env-file .env precip --dry-run   # full pipeline in a UTC container
+docker run --rm --env-file .env precip --once --dry-run   # full pipeline in a UTC container
+                                                          # (ConnectionStrings__Precip must reach the DB
+                                                          #  from inside the container, e.g. host.docker.internal)
 ```
 
 Deployed as an Azure Container Apps Job on a nightly cron: see
 [deploy/azure/README.md](deploy/azure/README.md).
 
-Fetches the NWS hourly forecast and raw gridpoint amounts for the configured
-coordinates, works out the next unfinished overnight window (8 PM → 7 AM) in the
-location's own time zone, and publishes one ntfy message if any hour in it is at
-or above the probability threshold. The message says rain, snow or ice, and how
-much.
+For each active location in Postgres, it fetches the NWS hourly forecast and
+raw gridpoint amounts, works out the next unfinished overnight window (8 PM →
+7 AM by default) in the location's own time zone, and publishes one ntfy message
+if any hour in it is at or above the location's probability threshold. The
+message says rain, snow or ice, and how much. A unique `(location, night)` row
+in the database makes any later run for the same night a no-op. The one
+deliberate exception is a lost ntfy response, which is resent rather than
+risk a missed alert ([D25](#d25-one-alert-per-location-per-night-a-locked-row-at-least-once)).
 
 ## Debt ledger
 
@@ -41,18 +50,20 @@ later block. Repaid rows stay, struck through, so the history is visible.
 | ~~Overnight window is always *today 20:00 → tomorrow 07:00*, regardless of when the job runs.~~ | ✅ Block 2 ([D2](#d2-which-night-a-run-evaluates)) |
 | ~~On the fall-back night the notification prints two identical "1 AM" lines.~~ *(Originally logged as "double-counts the repeated 01:00–02:00 hour". Captured payloads showed that was wrong: both 1 AM hours are real, distinct hours, and that night's window is genuinely 12 hours long. See [D3](#d3-window-edges-are-utc-instants-dst-handled-at-the-edges-only).)* | ✅ Block 2 ([D8](#d8-the-notification-answers-cushions-or-shovel-and-stays-unambiguous-on-dst-nights)) |
 | ~~`PrecipDecision` is throwaway naive code, not a tested pure function. No captured-payload tests.~~ | ✅ Block 2 ([D9](#d9-probability-decides-whether-to-alert-amounts-decide-how-loudly)) |
-| NWS gridpoint URL is re-fetched every run instead of cached. *(Moved from Block 2: the cache belongs on the Location row, and a container has no persistent disk to cache on.)* | Block 4 |
+| ~~NWS gridpoint URL is re-fetched every run instead of cached.~~ *(Moved from Block 2: the cache belongs on the Location row, and a container has no persistent disk to cache on.)* | ✅ Block 4 ([D27](#d27-the-gridpoint-and-time-zone-are-cached-on-the-location-row)) |
 | Spring-forward test payload is hand-built (`tests/Fixtures/nws/synthetic-dst-springforward`). *(New in Block 2.)* | Real capture ~2027-03-08 |
-| Coordinates and topic come from `.env` with no schema; only the window and threshold are validated. | Block 4 |
+| ~~Coordinates and topic come from `.env` with no schema; only the window and threshold are validated.~~ Coordinates, window and threshold are now rows with schema constraints. The topic deliberately stays a job secret. | ✅ Block 4 ([D26](#d26-rules-and-coordinates-are-data-their-invariants-live-in-the-schema)) |
 | No retry, backoff, circuit breaker, or timeout tuning on the HTTP calls. | Block 5 |
 | ~~Single weather provider, no abstraction seam.~~ Seam exists ([D7](#d7-nws-responses-map-onto-provider-neutral-types-surprises-fail-loudly)); second provider not yet plugged in. | Block 5 |
-| No persistence and no idempotency — every run that clears the threshold sends a notification. | Block 4 |
+| ~~No persistence and no idempotency — every run that clears the threshold sends a notification.~~ | ✅ Block 4 ([D25](#d25-one-alert-per-location-per-night-a-locked-row-at-least-once)) |
 | No tracing or metrics. | Block 6 |
 | Silence is ambiguous: "no precip" and "the job is dead" look identical. No heartbeat. | Block 6 |
 | ~~Console app only — no container, no schedule, runs from a dev machine.~~ | ✅ Block 3 ([D18](#d18-runtime-image-chiseled--extra-proved-by---self-check), [D19](#d19-the-nightly-run-is-2300-utc)) |
 | Image build, push and deploy are manual (`docker push`, `deploy/azure/deploy.sh`). CI only tests and builds. *(New in Block 3.)* | Block 7 |
-| A lost ntfy response plus the job's one retry can send the same alert twice ([D20](#d20-one-retry-and-the-duplicate-it-can-cause)). *(New in Block 3.)* | Block 4 |
+| A lost ntfy response plus the job's one retry can send the same alert twice ([D20](#d20-one-retry-and-the-duplicate-it-can-cause)). *(New in Block 3.)* Narrowed by D25 to that one ambiguous case, which is now kept on purpose: a duplicate is better than a missed alert. | Accepted ([D25](#d25-one-alert-per-location-per-night-a-locked-row-at-least-once)) |
 | Actions are pinned to major tags, not commit SHAs. Low risk while CI holds no secrets ([D24](#d24-review-deploysh-fails-closed)). *(New in Block 3.)* | Block 7 |
+| The admin API runs only on the dev box; it isn't deployed ([D30](#d30-the-admin-api-is-local-only-behind-an-api-key)). *(New in Block 4.)* | Block 7 |
+| One ntfy topic for every location. Per-location topics would mean storing a publish-capable secret in the database. *(New in Block 4.)* | Unscheduled |
 
 ## Decision log
 

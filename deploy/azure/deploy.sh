@@ -2,7 +2,7 @@
 # Creates or updates the nightly Azure Container Apps Job that runs the alerter.
 # Safe to re-run: every resource is checked with `show`, then created or updated.
 #
-# Required env:  IMAGE  PRECIP_LAT  PRECIP_LON  PRECIP_NTFY_TOPIC  PRECIP_USER_AGENT
+# Required env:  IMAGE  ConnectionStrings__Precip  PRECIP_NTFY_TOPIC  PRECIP_USER_AGENT
 # Optional env:  AZ_RG (rg-precip)  AZ_LOCATION (eastus)  AZ_ENV (cae-precip)
 #                AZ_JOB (job-precip-nightly)  GHCR_USER + GHCR_PAT (both or neither)
 #
@@ -18,8 +18,7 @@ AZ_ENV="${AZ_ENV:-cae-precip}"
 AZ_JOB="${AZ_JOB:-job-precip-nightly}"
 
 : "${IMAGE:?set IMAGE, e.g. ghcr.io/hobbesmd/precipitation-notification:<git-sha>}"
-: "${PRECIP_LAT:?set PRECIP_LAT}"
-: "${PRECIP_LON:?set PRECIP_LON}"
+: "${ConnectionStrings__Precip:?set ConnectionStrings__Precip (the Neon connection string)}"
 : "${PRECIP_NTFY_TOPIC:?set PRECIP_NTFY_TOPIC}"
 : "${PRECIP_USER_AGENT:?set PRECIP_USER_AGENT (NWS rejects requests without contact info)}"
 
@@ -73,25 +72,28 @@ fi
 # is always before the 8 PM local window opens, in both halves of the DST year.
 CRON="0 23 * * *"
 
-# Secret names are limited to 20 chars. Lat/lon are secrets because they pin the
-# owner's home. Env vars reference them with secretref:.
+# Secret names are limited to 20 chars. The ntfy topic and the DB connection string
+# (it carries the password) are secrets; env vars reference them with secretref:.
+# Coordinates, window and threshold are rows in the database now, not job config.
 secrets=(
   "ntfy-topic=$PRECIP_NTFY_TOPIC"
-  "precip-lat=$PRECIP_LAT"
-  "precip-lon=$PRECIP_LON"
+  "db-conn=$ConnectionStrings__Precip"
 )
 env_vars=(
   "PRECIP_NTFY_TOPIC=secretref:ntfy-topic"
-  "PRECIP_LAT=secretref:precip-lat"
-  "PRECIP_LON=secretref:precip-lon"
+  "ConnectionStrings__Precip=secretref:db-conn"
   "PRECIP_USER_AGENT=$PRECIP_USER_AGENT"
-  "PRECIP_WINDOW_START=20:00"
-  "PRECIP_WINDOW_END=07:00"
 )
 
-# One retry covers an NWS blip. A retry can duplicate an alert only if ntfy
-# accepted the push but the response was lost; accepted until Block 4's
-# DB-enforced idempotency.
+# The job runs one pass and exits. `--args=--once` (with the `=`): the CLI's parser
+# rejects a separate `--args --once` as an unrecognized argument. This replaces the
+# image's default arguments only; the ENTRYPOINT (dotnet Worker.dll) still applies.
+# Migrations are NOT run here: apply them explicitly with `Worker --migrate`
+# (deploy/azure/README.md) so a deploy never changes the schema as a side effect.
+job_args=(--args=--once)
+
+# One retry covers an NWS blip. The database's UNIQUE (location, night) key
+# (D25/D26) is what stops a retry or a second execution from alerting twice.
 sizing=(
   --replica-timeout 300
   --replica-retry-limit 1
@@ -131,7 +133,20 @@ if exists az containerapp job show -n "$AZ_JOB" -g "$AZ_RG"; then
     --image "$IMAGE" \
     --cron-expression "$CRON" \
     "${sizing[@]}" \
+    "${job_args[@]}" \
     --replace-env-vars "${env_vars[@]}" -o none
+  # Block 3's coordinate secrets are dead weight now. Azure refuses to remove a
+  # secret something still references, so this must come after the update above
+  # (whose --replace-env-vars dropped the old secretref: variables). Names only:
+  # `secret list` hides values unless --show-values is passed. A failing list
+  # aborts the script (set -e), it is never read as "nothing to remove".
+  current_secrets=$(az containerapp job secret list -n "$AZ_JOB" -g "$AZ_RG" --query "[].name" -o tsv | tr -d '\r')
+  for old in precip-lat precip-lon; do
+    if grep -qxF "$old" <<<"$current_secrets"; then
+      echo "Removing obsolete secret $old..."
+      az containerapp job secret remove -n "$AZ_JOB" -g "$AZ_RG" --secret-names "$old" --yes -o none
+    fi
+  done
 else
   echo "Creating job $AZ_JOB..."
   registry_args=()
@@ -146,6 +161,7 @@ else
     --trigger-type Schedule --cron-expression "$CRON" \
     --image "$IMAGE" \
     "${sizing[@]}" \
+    "${job_args[@]}" \
     ${registry_args[@]+"${registry_args[@]}"} \
     --secrets "${secrets[@]}" \
     --env-vars "${env_vars[@]}" -o none
