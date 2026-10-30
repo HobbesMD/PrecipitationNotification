@@ -22,7 +22,12 @@ internal static class WorkerServices
         // HttpClient's own logging prints "Start processing HTTP request GET <full url>" at Information,
         // and the URL is /points/{lat},{lon} for NWS and /{topic} for ntfy: both secret (D22). Off, not
         // lowered: a failure still reaches our own error log, which names the type and message only.
-        services.AddLogging(logging => logging.AddFilter("System.Net.Http.HttpClient", LogLevel.None));
+        // EF logs every SQL command at Information. Parameter values are never included (no sensitive
+        // data logging), but the SQL text would be most of each night's Log Analytics ingestion. Failed
+        // commands still log at Error.
+        services.AddLogging(logging => logging
+            .AddFilter("System.Net.Http.HttpClient", LogLevel.None)
+            .AddFilter("Microsoft.EntityFrameworkCore.Database.Command", LogLevel.Warning));
 
         services.AddDbContext<PrecipDbContext>((_, options) =>
         {

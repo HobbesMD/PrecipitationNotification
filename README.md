@@ -1164,6 +1164,10 @@ it needs.
   Information level it logs every request's full URL, and that URL contains
   the coordinates (`/points/{lat},{lon}`) and the ntfy topic. The integration
   agent found this; removing the filter makes two `WorkerServicesTests` fail.
+- EF Core's per-command SQL log is raised to Warning. It never carried
+  parameter values (sensitive-data logging stays off), but the SQL text was
+  most of a run's output. The local end-to-end run caught that. Failed
+  commands still log.
 
 **Tests:**
 - `NightlyPassTests` (25):
