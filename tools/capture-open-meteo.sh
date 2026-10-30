@@ -21,7 +21,7 @@ lon="-74.006"
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 
 url="https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}"
-url+="&hourly=precipitation_probability,precipitation,snowfall,weather_code"
+url+="&hourly=precipitation_probability,precipitation,snowfall,weather_code,temperature_2m&temperature_unit=fahrenheit"
 url+="&timeformat=unixtime&timezone=auto&forecast_days=4"
 
 stamp="$(date -u +%Y-%m-%dT%H%MZ)"

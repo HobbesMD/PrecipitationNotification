@@ -1379,3 +1379,25 @@ Each test asserts how many requests actually reached the server. The suite passe
 - `A_connection_dropped_after_the_request_was_read_is_sent_exactly_once`. WireMock can't drop a connection mid-exchange, so a raw socket reads the request and closes.
 - `A_refused_connection_is_retried_up_to_MaxAttempts_then_throws` and `An_unresolvable_host_is_retried_up_to_MaxAttempts_then_throws`
 - `Publisher_retries_a_503_and_sends_the_same_body_and_headers_twice`
+
+#### D35. Open-Meteo maps onto the same types, and its hours end at their timestamp
+
+**Decision:** `OpenMeteoClient` asks `/v1/forecast` for hourly `precipitation_probability`, `precipitation`, `snowfall`, `weather_code` and `temperature_2m`, with `timeformat=unixtime`, `timezone=auto` and `temperature_unit=fahrenheit`. `OpenMeteoMapper` turns the response into the same `ProviderForecast` NWS produces, so the decision engine can't tell them apart.
+
+**The trap: preceding-hour values.** Open-Meteo documents precipitation, its probability and snowfall as covering **the hour before** the timestamp. A value stamped 01:00 describes 00:00–01:00. So each entry becomes an hour starting at *T − 1h*. Reading *T* as the start would shift every hour, and the overnight window with it, one hour late. The test `Value_at_T_describes_the_hour_ending_at_T` pins this.
+
+**Other mapping rules:**
+- **Unix time** (`timeformat=unixtime`): every instant is unambiguous, so the DST rules of D3 and the offset rule of D14 hold with no local-time parsing at all.
+- **Units fail loudly, as in D7:** precipitation must be `mm` and snowfall `cm`. Snowfall is converted cm → mm of depth (×10), the unit NWS's `snowfallAmount` uses.
+- **Ice:** Open-Meteo has no ice-accumulation series. Hours whose weather code is freezing drizzle or freezing rain (WMO 56, 57, 66, 67) put their precipitation in the ice series.
+- **Short text** comes from the WMO weather-code table, worded so D11's whole-word keywords still work ("Light freezing rain" reads as ice, "Light snow" as snow, "Fog" never as ice).
+- **Temperature is display-only.** By D16's rule an input that doesn't decide the alert must never block it, so a missing series, a null or a non-°F unit just omits the temperature from the message. It never fails the forecast or prints a fake 0. The integration review caught that the first version printed "0".
+
+**Rejected:** treating *T* as the hour's start (wrong by an hour); failing the forecast on a temperature problem (D16); mixing NWS hours with Open-Meteo amounts (D36).
+
+**Tests:** `OpenMeteoMapperTests` / `OpenMeteoClientTests`, including a captured Open-Meteo payload for a fixed public point (`tools/capture-open-meteo.sh`):
+- `Fall_back_night_has_twelve_in_range_hours_and_no_gaps`: on the 2026-10-31 fall-back night, the real capture gives exactly the 12 hours D3 says that night has.
+- `Value_at_T_describes_the_hour_ending_at_T`
+- `Wrong_units_throw_and_name_the_unit`, `Snowfall_centimetres_become_millimetres_of_depth`
+- `Freezing_rain_or_drizzle_hour_lands_in_ice`, `Weather_code_text_and_resulting_kind`
+- `Temperature_maps_only_when_fahrenheit`

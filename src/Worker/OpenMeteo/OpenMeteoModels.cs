@@ -30,4 +30,5 @@ internal sealed record OpenMeteoHourly(
     [property: JsonPropertyName("precipitation_probability")] int?[]? PrecipitationProbability,
     [property: JsonPropertyName("precipitation")] double?[]? Precipitation,
     [property: JsonPropertyName("snowfall")] double?[]? Snowfall,
-    [property: JsonPropertyName("weather_code")] int?[]? WeatherCode);
+    [property: JsonPropertyName("weather_code")] int?[]? WeatherCode,
+    [property: JsonPropertyName("temperature_2m")] double?[]? Temperature2m = null);
