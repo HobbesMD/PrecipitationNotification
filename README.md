@@ -835,6 +835,109 @@ action has little to steal. Revisit in Block 7, when CI gets push credentials.
 
 ### Block 4: persistence + API
 
+#### D25. One alert per location per night: a locked row, at-least-once
+
+**Decision:** the `alert_history` row for `(location_id, night_date)` is both
+the record and the lock. `PostgresAlertLedger.SendOnceAsync` does this in one
+transaction:
+1. **Claim:** `INSERT … ON CONFLICT (location_id, night_date) DO NOTHING`
+   against the unique index from D26.
+2. **Lock:** `SELECT … FOR UPDATE` on that row. If it's already `Sent`, stop
+   and return `AlreadySent`.
+3. **Publish to ntfy while still holding the lock.**
+4. **Commit:** only a 2xx from ntfy marks the row `Sent`, in the same
+   transaction.
+
+A second sender for the same key, whether a retry, an overlapping manual run or
+the hourly local loop, blocks at step 1 or 2 until the first one finishes. It
+then sees `Sent` and publishes nothing.
+
+**Why both statements:**
+- **The insert** is the serialization point for a brand-new night. Postgres
+  makes a second `INSERT` of the same key *wait* for the first transaction's
+  uncommitted insert, rather than fail or pass.
+- **`FOR UPDATE`** covers a night that already has a `Pending` row from an
+  earlier failed attempt. `ON CONFLICT DO NOTHING` takes no lock on an existing
+  row, so without it two senders could both read `Pending` and both publish.
+
+**The one gap, chosen on purpose (at-least-once):** exactly-once is impossible
+here, because the side effect lives in ntfy, outside the transaction. Suppose
+ntfy accepted the push but the response was lost (a timeout or a reset). The
+publish throws, the transaction rolls back, and the row stays `Pending`, so the
+next attempt sends again and the phone buzzes twice. I chose a possible
+duplicate over a possible missed alert, the same "when in doubt, warn" rule as
+D3 and D16.
+
+**Rejected:**
+- **At-most-once:** commit a `Claimed` row *before* sending; a retry that finds
+  it stays silent. That fully repays D20, but a crash or lost request after the
+  claim means **no alert that night**, which is the failure the project exists
+  to prevent.
+- **At-most-once plus releasing definite failures** (DNS errors, refused
+  connections, non-2xx). Only a timeout or reset would then stay silent. It's
+  the most nuanced option and needs the most code and tests, yet it still drops
+  the alert in the one case that is genuinely ambiguous.
+- **Deduplicating in memory, or checking first and then sending.** Two
+  processes don't share memory, and a check-then-send has a race window.
+
+**Details that matter:**
+- **A failed send is recorded, not lost.** After the rollback, a separate short
+  transaction upserts the row as `Pending`, with `attempts + 1` and
+  `last_error`. `last_error` has every URL scrubbed out, because the topic is
+  the last path segment of the publish URL. That upsert only touches rows that
+  are still `Pending`, so it can never turn a `Sent` row back. A `Pending` row
+  never blocks a send.
+- **A timeout counts as a failure, not a cancellation.** `HttpClient` reports
+  its own timeout as a `TaskCanceledException`. Only cancellation of *our* token
+  counts as "stop". A timed-out POST is exactly the lost-response case, so it is
+  recorded and retried.
+- **After the push, nothing can be cancelled.** Once ntfy has accepted, marking
+  `Sent` and committing ignore cancellation. Aborting there would only turn a
+  stop request into a duplicate.
+- **`IsSentAsync` is an optimization, not enforcement.** The nightly pass calls
+  it first so an already-sent night skips the NWS fetch. Enforcement is
+  `SendOnceAsync`, which re-checks under the lock.
+- **The key comes from D2.** A 23:00Z run and a 05:00Z retry (1 AM EDT) both
+  resolve to the same `NightDate`, which is why the retry is a no-op.
+
+**What would break it:**
+- Neon's pooled (PgBouncer) endpoint, or an `idle_in_transaction_session_timeout`
+  shorter than the ntfy timeout (30 s). Either would kill the transaction while
+  the lock is held across the HTTP call. Production uses the direct endpoint
+  (D29).
+- **A second duplicate window:** if the commit itself fails *after* a 2xx, the
+  row stays `Pending` and the next run resends. It's the same at-least-once
+  case, and it's accepted with it.
+- Renaming the unique index (D26).
+
+**Tests:** `tests/Worker.Tests/Alerts/`, against real Postgres:
+- `First_send_publishes_once_and_records_Sent`, and
+  `Second_send_for_the_same_key_publishes_nothing`.
+- `Retry_after_local_midnight_resolves_to_the_same_night_and_publishes_nothing`:
+  the D2 tie-in, using the real `NightWindow.Resolve`.
+- `Eight_simultaneous_senders_publish_exactly_once`: 8 contexts released by one
+  barrier, a 200 ms publish, 5 rounds, run for a brand-new night *and* for a
+  night with an earlier `Pending` row. Exactly 1 publish each round.
+- `Lost_response_is_resent_this_is_the_accepted_duplicate`: 2 publishes, by
+  design. The test exists so the gap is visible, not hidden.
+- `Http_timeout_is_a_recorded_failure_not_a_cancellation`.
+- `Crash_mid_send_leaves_no_Sent_row_and_the_next_run_publishes`: one variant
+  disposes the connection, the other uses `pg_terminate_backend`, which is
+  closer to a process dying.
+- `Earlier_Pending_row_does_not_block_a_send`, and
+  `Different_night_or_different_location_sends_independently`.
+- `Cancellation_throws_and_leaves_the_row_unchanged`.
+- `Failure_text_never_carries_a_url`.
+
+**Mutation check:**
+- **Removing `FOR UPDATE`** failed only the earlier-`Pending` race, with 8
+  publishes instead of 1. The brand-new-night race still passed, because the
+  waiting insert serializes it. A single race test would have missed this
+  mutation, which is why there are two.
+- **Removing the `ON CONFLICT` insert** failed 10 of 17 tests.
+- **A realistic "check first, insert if missing" rewrite** failed the
+  brand-new-night race. The losers got a 23505 error instead of `AlreadySent`.
+
 #### D26. Rules and coordinates are data; their invariants live in the schema
 
 **Decision:** locations, their alert rules and the alert history move into
