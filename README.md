@@ -21,6 +21,9 @@ dotnet run --project src/Worker -- --once --dry-run      # print the message, do
 dotnet run --project src/Worker                          # long-running: a pass now, then every Worker__Interval
 dotnet test                                              # DB tests need Docker (Testcontainers)
 
+docker compose up -d aspire-dashboard                    # local traces/metrics/logs UI: http://localhost:18888
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 dotnet run --project src/Worker -- --once --dry-run
+
 docker build -t precip .
 docker run --rm precip --self-check                # image has real time-zone data? (exit 0/5)
 docker run --rm --env-file .env precip --once --dry-run   # full pipeline in a UTC container
@@ -56,14 +59,15 @@ later block. Repaid rows stay, struck through, so the history is visible.
 | ~~No retry, backoff, circuit breaker, or timeout tuning on the HTTP calls.~~ | ✅ Block 5 ([D33](#d33-every-forecast-get-runs-through-one-polly-pipeline-10-s-attempt-3-tries-30-s-total-a-breaker-per-provider), [D34](#d34-ntfy-is-retried-only-when-the-request-provably-never-arrived)) |
 | ~~Single weather provider, no abstraction seam.~~ ~~Seam exists ([D7](#d7-nws-responses-map-onto-provider-neutral-types-surprises-fail-loudly)); second provider not yet plugged in.~~ | ✅ Block 5 ([D36](#d36-open-meteo-is-the-fallback-a-fallback-night-keeps-the-same-key-and-says-where-it-came-from)) |
 | ~~No persistence and no idempotency — every run that clears the threshold sends a notification.~~ | ✅ Block 4 ([D25](#d25-one-alert-per-location-per-night-a-locked-row-at-least-once)) |
-| No tracing or metrics. | Block 6 |
-| Silence is ambiguous: "no precip" and "the job is dead" look identical. No heartbeat. | Block 6 |
+| ~~No tracing or metrics.~~ | ✅ Block 6 ([D41](#d41-telemetry-speaks-otlp-only-the-backend-is-configuration), [D43](#d43-whats-measured-and-why-metric-tags-never-name-a-location)) |
+| ~~Silence is ambiguous: "no precip" and "the job is dead" look identical. No heartbeat.~~ | ✅ Block 6 ([D39](#d39-the-heartbeat-is-an-outside-watcher-healthchecksio-pinged-at-start-and-with-the-exit-code)) |
 | ~~Console app only — no container, no schedule, runs from a dev machine.~~ | ✅ Block 3 ([D18](#d18-runtime-image-chiseled--extra-proved-by---self-check), [D19](#d19-the-nightly-run-is-2300-utc)) |
 | Image build, push and deploy are manual (`docker push`, `deploy/azure/deploy.sh`). CI only tests and builds. *(New in Block 3.)* | Block 7 |
 | A lost ntfy response plus the job's one retry can send the same alert twice ([D20](#d20-one-retry-and-the-duplicate-it-can-cause)). *(New in Block 3.)* Narrowed by D25 to that one ambiguous case, which is now kept on purpose: a duplicate is better than a missed alert. | Accepted ([D25](#d25-one-alert-per-location-per-night-a-locked-row-at-least-once)) |
 | Actions are pinned to major tags, not commit SHAs. Low risk while CI holds no secrets ([D24](#d24-review-deploysh-fails-closed)). *(New in Block 3.)* | Block 7 |
 | The admin API runs only on the dev box; it isn't deployed ([D30](#d30-the-admin-api-is-local-only-behind-an-api-key)). *(New in Block 4.)* | Block 7 |
 | One ntfy topic for every location. Per-location topics would mean storing a publish-capable secret in the database. *(New in Block 4.)* | Unscheduled |
+| The WireMock-based resilience tests (`NtfyResilienceTests`, `NwsBreakerIsolationTests`) occasionally time out on a cold first build; reproduced on `main` before Block 6 touched anything. *(New in Block 6.)* | Unscheduled |
 | The Open-Meteo capture is a dry week, so wet-night mapping is proven only with hand-built payloads ([D35](#d35-open-meteo-maps-onto-the-same-types-and-its-hours-end-at-their-timestamp)). *(New in Block 5.)* | Real wet capture, when one comes |
 
 ## Decision log
@@ -1519,3 +1523,124 @@ It found one high-severity defect and two medium ones.
 - `deploy.sh` deployed image `fdc63261b157` (`--once`, cron 23:00 UTC, 300 s timeout, one retry; secrets `db-conn` and `ntfy-topic`).
 - A manual start at the real threshold (`job-precip-nightly-s0crjtz`) took the NWS path, evaluated the fall-back night's 12-hour window, found no hits and sent nothing. No GSSAPI or Polly noise appeared in its logs.
 - The fallback itself was proven locally (D36). Forcing an NWS outage in production would mean editing the job's config for a drill, which isn't worth the risk for a one-location job.
+
+### Block 6: observability
+
+#### D39. The heartbeat is an outside watcher: healthchecks.io, pinged at start and with the exit code
+
+**Problem:** no notification means either "dry night" or "the job died three weeks ago." Nothing inside the job can tell those apart, because a job that never starts can't report anything.
+
+**Decision:** a dead-man's switch on healthchecks.io (free tier).
+- Every `--once` run sends `POST {ping url}/start` before the pass, and `POST {ping url}/{exit code}` after it. The body is one safe line, such as `exit 2: both forecast providers failed`.
+- The check is scheduled `0 23 * * *` UTC with a 1 hour grace period. healthchecks.io alerts when:
+  - a run reports a non-zero code (at once);
+  - a run starts and never finishes (after the grace period: the replica was killed);
+  - no run arrives at all (after the grace period: the cron was deleted, the image doesn't pull, the subscription is disabled, the job is broken before the host starts).
+- Alerts go to **email and a second ntfy topic**. If ntfy itself is down, the alerts topic can't report that, so email is the channel that doesn't share the failure.
+- The ping URL (`PRECIP_HEARTBEAT_URL`) is a secret: anyone holding it can report "healthy". It's a job secret like the topic, `https` only, never logged, and `AppConfig.ToString` redacts it. `deploy.sh` refuses to deploy without it.
+- Only `--once` without `--dry-run` pings. The local loop and dry runs never do, so a dev run with production's `.env` can't fake a healthy night.
+
+**Rejected:**
+- **An Azure Monitor alert rule** on job executions. No new vendor and no code, but the watcher lives in the same Azure subscription and resource group as the thing it watches, so it misses exactly the "Azure itself broke" cases. It also costs money and is configured with fiddly CLI.
+- **A nightly "all clear" push.** No infrastructure, but it makes me the watcher: a missing message has to be *noticed*, and a nightly ping trains me to ignore the app.
+
+**What would break it:** healthchecks.io being down. That fails loud (a false "down" alert), not silent. A run that dies before the host starts (a config error, exit 1) sends no ping, so it's caught by the grace period, not instantly.
+
+**Tests:**
+- `HealthchecksHeartbeatTests`:
+  - `Start_posts_to_slash_start`, `Finish_zero_posts_to_slash_0_with_an_ok_body`, `Finish_two_posts_to_slash_2_and_the_body_names_the_failure`
+  - `A_failure_never_logs_the_secret_uuid_or_the_url`
+  - `No_url_gives_the_no_op`, `Dry_run_gives_the_no_op_even_with_a_url`, `The_real_heartbeat_wins_over_the_pass_defaults`
+- `OncePassHeartbeatTests`: `Start_comes_before_the_pass_and_finish_after_it_with_the_passs_code`, `A_throwing_pass_finishes_with_1`, `The_hard_deadline_finishes_with_7`.
+- `AppConfigTests`: `Heartbeat_url_that_is_not_absolute_https_is_rejected_without_echoing_it`, `ToString_redacts_the_heartbeat_url`.
+
+#### D40. A heartbeat or telemetry failure never changes the outcome, and the 300 s budget holds by construction
+
+**Decision:**
+- **The heartbeat can't hurt the run.** Each ping gets 2 attempts of 2 s, at most 4 s, retrying network errors, timeouts and 5xx but not 4xx. `IHeartbeat` promises never to throw, and `OncePassService` enforces that anyway: a ping that throws is logged and dropped. A broken start ping still runs the pass; a broken finish ping still leaves the pass's exit code and stops the host normally.
+- **The flush can't hold the exit.** Disposing the host is when a `--once` run flushes its telemetry. Each OTLP export has a 5 s timeout, but there are three providers (traces, metrics, logs), and the metrics provider exports again on shutdown. Against a collector that never answers, disposal was **measured at 10 s**. So `Program` no longer uses `host.RunAsync()`, which disposes with no limit. `BoundedShutdown` disposes on a pool thread and abandons it after **5 s**. Unsent telemetry is lost; the exit code never is.
+- **The budget:** start ping ≤4 s + hard deadline 270 s (≤280 s, D38) + finish ping ≤4 s + flush ≤5 s = 283 s by default, at most 293 s, inside Azure's 300 s replica timeout. Every term is enforced in code, not by arithmetic about how long things usually take. That's D38's lesson applied again.
+
+**Azure's retry shows up honestly.** A failed first attempt pings `/<code>`, which alerts at once. If D20's one retry then succeeds, it pings `/0` and healthchecks.io sends "back up". Two messages, both true.
+
+**Rejected:**
+- **Trusting the 5 s exporter timeout.** That was the first plan's arithmetic, and the measurement disproved it.
+- **Making the heartbeat part of the pass** (a failed ping fails the run). Then a healthchecks.io outage would turn into failed runs and Azure retries, and could even cost an alert.
+
+**Tests:**
+- `BoundedShutdownTests.A_collector_that_never_answers_cannot_hold_the_exit_past_the_budget`: the measured case, with real providers and a WireMock collector that never responds.
+- `BoundedShutdownTests.A_disposal_that_blocks_is_abandoned_at_the_budget_and_says_so`, `A_quick_disposal_completes_and_says_nothing`
+- `HealthchecksHeartbeatTests`: `A_hanging_server_is_given_up_on_within_the_budget`, `Always_500_returns_after_two_attempts_with_one_warning`, `A_404_is_not_retried`, `A_cancelled_caller_token_returns_without_throwing`
+- `OncePassHeartbeatTests`: `A_faulting_start_still_runs_the_pass`, `A_faulting_finish_does_not_change_the_exit_code_or_stop_the_host_abnormally`, `A_slow_heartbeat_does_not_change_the_exit_code`
+
+**Locally (2026-11-01):** with `OTEL_EXPORTER_OTLP_ENDPOINT` pointed at a closed port, `--once --dry-run` printed `Shutdown: telemetry flush did not finish within 5 s; exiting without it.` and exited 0, 10 s wall clock including startup and the pass.
+
+#### D41. Telemetry speaks OTLP only; the backend is configuration
+
+**Decision:** the code emits through `System.Diagnostics` (`ActivitySource`, `Meter`, `ILogger`) and exports through the OpenTelemetry SDK's **OTLP** exporters, configured by the standard `OTEL_EXPORTER_OTLP_*` variables.
+- **Locally:** the .NET Aspire dashboard in `docker compose` (UI on `localhost:18888`, OTLP on `localhost:4317`), bound to 127.0.0.1 only.
+- **In production:** Grafana Cloud's free tier: Tempo for traces, Mimir for metrics, Loki for logs. The endpoint is plain config; the `Authorization` header is a job secret.
+- **Export is on only when `OTEL_EXPORTER_OTLP_ENDPOINT` is set.** Tests, CI and a bare `dotnet run` export nothing and print no connection errors. The SDK still runs (spans exist, the redactor runs, tests can attach an in-memory exporter); only the exporter is missing.
+- The OTLP settings are read from the host's configuration in one place, not left to each exporter's own environment reading, so the same configuration decides in production and in tests. A malformed endpoint, protocol or timeout fails startup with exit 1, naming the key and never the value.
+- `service.version` is the deployed image's git sha (`OTEL_RESOURCE_ATTRIBUTES`, set by `deploy.sh`), so a trace maps to a commit, as D18's image tags do.
+
+**Rejected:**
+- **The Azure Monitor exporter.** It keeps everything in one resource group, but ties the code to a vendor's exporter, and swapping backends would mean a code change.
+- **Honeycomb.** The best trace explorer, but built around events; metrics fit less naturally.
+- **Local only.** The cheapest option, but it leaves no production trace to show anyone.
+
+**What would break it:** a Grafana Cloud outage or a revoked token loses telemetry for those nights. The heartbeat (D39) is independent of it, so the nights still aren't silent.
+
+**The Api isn't instrumented.** It runs only on the dev box (D30); the Worker is the thing that runs unattended.
+
+**Tests:** `WorkerTelemetryTests`:
+- `Endpoint_set_flushes_spans_to_v1_traces_when_the_provider_is_disposed`
+- `No_endpoint_means_no_export_even_if_the_sdk_could_find_one`
+- `Malformed_otlp_setting_fails_startup_naming_the_key`
+
+**Locally (2026-11-01):** `--once --dry-run` against the Aspire dashboard produced one trace: `precip.pass` → Npgsql spans for the location query → `precip.location` (outcome `dry`, provider `NWS`) → `precip.fetch` → two HTTP spans, `https://api.weather.gov/gridpoints/{redacted}/{redacted}/forecast/hourly` and `.../gridpoints/{redacted}/{redacted}` → `precip.evaluate`. No coordinate appeared in the exported spans or logs.
+
+#### D42. Telemetry is redacted by allowlist before any exporter sees it, and no trace context leaves the process
+
+**Problem:** standard HTTP instrumentation records each request's full URL. Ours carry secrets (D22): `/points/{lat},{lon}`, `/gridpoints/{office}/{x},{y}` (the grid cell pins a location to about 2.5 km), Open-Meteo's `?latitude=…&longitude=…`, ntfy's `/{topic}`, and the heartbeat's `/{uuid}`. Npgsql's spans and metrics carry the connection string (password removed, but user, host and database still in it).
+
+**Decision:** keep the standard instrumentation (it's what shows Polly's retries as separate HTTP spans) and put a `TelemetryRedactor` processor in front of every exporter.
+- **An allowlist per source, failing closed.** For each span source (`System.Net.Http`, `Npgsql`, `Precip.Worker`) only the listed attributes survive. Any other source loses every attribute. A library upgrade that adds a new attribute drops it until someone allowlists it on purpose.
+- **URLs keep their shape, not their values.** A path segment survives only if it's a known literal (`points`, `gridpoints`, `forecast`, `hourly`, `v1`, `start`) or a 1–3 digit exit code; everything else becomes `{redacted}`, and the query string is dropped. The same rewrite applies to URLs inside status descriptions and exception messages.
+- **Exception events keep type and message, never the stack trace**, as `Redact.Describe` does for logs. .NET has no public way to edit an event after it's added, so the redactor rewrites them as they're added, by hooking `AddException`. In `OnEnd`, a span whose events still carry anything it can't vouch for (a stack trace, an unredacted message, a tag off the list) is **dropped entirely**. Dropping a span is the fail-closed choice. One residue: the `exception.stacktrace` key is still exported, with an empty value.
+- **Order is the guarantee.** OpenTelemetry runs processors in registration order, and an exporter is itself a processor. The redactor is registered first, so every exporter, including one a test adds later, only sees redacted spans.
+- **Metrics get tag allowlists too**, because they bypass span processors. Npgsql's `db.client.connection.pool.name` (the connection string) is dropped, and our own meter may never use the location id or name as a tag.
+- **Logs rely on the existing D22 log hygiene.** HttpClient's URL-logging category is off, our errors go through `Redact.Describe`, and nothing logs an exception object. The OTLP log exporter sends what the console log already sends to Log Analytics.
+- **The time zone is logged at Debug only.** The local smoke run showed Block 2's `Time zone: <zone>` line, at Information, being exported to the new backend. The zone isn't a D22 secret, but it hints at where the location is, and CLAUDE.md keeps it out of the repo for that reason. Production logs at Information, so the line no longer leaves the box. Nothing is lost: the zone is cached on the location row (D27). The one exception, kept on purpose: the rare warning when Open-Meteo's zone disagrees with the cached one (D36) names both, because that warning is useless without them.
+- **No `traceparent` header goes to NWS, Open-Meteo, ntfy or healthchecks.io.** The process installs .NET's no-output propagator. Third parties have no use for our trace ids.
+
+**Rejected:**
+- **Hand-made spans only, with no HTTP instrumentation.** Nothing could leak unless we wrote it, but Polly's per-attempt retries would vanish from traces unless rebuilt by hand.
+- **A deny-list** ("remove `url.full` and `url.path`"). It is correct only until a library adds an attribute nobody listed.
+- **Scrubbing without a test.** No defence against regressions.
+
+**Tests:**
+- `TelemetryRedactorTests`:
+  - `RedactUrl_keeps_the_shape_and_drops_every_secret` (18 real-shaped URLs), `RedactUrlsIn_rewrites_every_url_in_a_longer_message`
+  - `Http_span_keeps_only_the_allowlist_and_a_redacted_url`, `Npgsql_span_drops_the_data_source_and_connection_details`, `Precip_span_keeps_precip_keys_only`, `Unknown_source_loses_every_tag`
+  - `Exception_event_keeps_type_and_redacted_message_and_no_stack_trace`
+  - `Exception_event_added_by_hand_with_a_stack_trace_drops_the_span`, `Event_with_a_tag_off_the_allowlist_drops_the_span`, `Link_with_tags_drops_the_span`
+- `WorkerTelemetryTests.Exporter_added_later_only_sees_the_redacted_http_span`: a real HttpClient request to `/points/40.7128,-74.006`, captured by an exporter registered *after* the redactor.
+- `NightlyPassTests.The_time_zone_is_logged_only_at_debug`
+- A whole-pass leak test over all three signals follows in Wave 2.
+
+#### D43. What's measured, and why metric tags never name a location
+
+**Spans** (source `Precip.Worker`), one trace per pass:
+- `precip.pass`: location count and exit code. Error status on any non-zero code, and on cancellation.
+- `precip.location`, one per location: id, name, night date, provider, outcome (`dry`, `alerted`, `already_sent`, `failed`, `skipped_deadline`) and exit code. Deadline-skipped locations still get a span, so "not checked" is visible (D37).
+- `precip.fetch`, once per provider tried; HTTP spans nest under it, so a retry or a fallback is visible as structure. The NWS one spans the point lookup and the forecast. On an already-sent night it holds only the point lookup and the ledger check, which is what that night actually did.
+- `precip.evaluate` (hits, peak, verdict) and `precip.notify` (Sent or AlreadySent).
+
+**Metrics** (meter `Precip.Worker`): `precip.passes` by exit code; `precip.pass.duration`; `precip.locations` by outcome and provider; `precip.provider.fallbacks`; `precip.alerts.sent` by provider. Plus .NET's HttpClient metrics, Polly's and Npgsql's, under the D42 tag allowlists.
+
+**Why no location in metric tags:** each tag value multiplies the number of time series, and a location id or name on every series would also ship location identity to the metrics backend for no analytical gain. Spans may carry id and name, because the logs already do (D22).
+
+**An honest limit:** a once-a-night job makes sparse metrics. Each run is a new process, so every counter starts at zero and is exported once on exit. Metrics answer "how many fallbacks this month"; the trace and the heartbeat answer "what happened last night."
+
+**Tests:** `NightlyPassTelemetryTests.Pass_emits_the_expected_spans_and_metrics`, one row each for a dry night, an alert, already sent, NWS failing and the fallback answering, both failing, a deadline skip, the database down, and a dry run. Each row asserts the span tree, outcomes, exit codes, statuses and the metric measurements. It also asserts that no metric tag key mentions "location", and that no span carries a coordinate, a URL or the database password. `Cancellation_marks_the_pass_span_cancelled_and_rethrows`.

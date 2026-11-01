@@ -99,7 +99,7 @@ internal sealed class OncePassService(
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         // Outside the backstop's clock: PassBackstop starts timing the pass, not the ping.
-        await heartbeat.StartAsync(CancellationToken.None);
+        await PingAsync("start", () => heartbeat.StartAsync(CancellationToken.None));
         try
         {
             exit.Code = await PassBackstop.RunAsync(scopes, options, clock, log, stoppingToken);
@@ -117,8 +117,26 @@ internal sealed class OncePassService(
         }
         finally
         {
-            await heartbeat.FinishAsync(exit.Code, CancellationToken.None);
+            await PingAsync("finish", () => heartbeat.FinishAsync(exit.Code, CancellationToken.None));
             lifetime.StopApplication();
+        }
+    }
+
+    /// <summary>
+    /// <see cref="IHeartbeat"/> promises never to throw; this makes the promise hold even for a
+    /// broken implementation. A start ping that threw would skip the night's pass, and a finish
+    /// ping that threw would escape <c>finally</c> before <c>StopApplication</c>. Neither may cost
+    /// an alert or change the exit code, so a fault is logged (type and message only) and dropped.
+    /// </summary>
+    private async Task PingAsync(string kind, Func<Task> ping)
+    {
+        try
+        {
+            await ping();
+        }
+        catch (Exception ex)
+        {
+            log.LogWarning("Heartbeat {Kind} ping faulted: {Error}", kind, Redact.Describe(ex));
         }
     }
 }

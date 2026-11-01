@@ -104,10 +104,12 @@ else
     builder.Services.AddPassLoop(interval);
 }
 
-using var host = builder.Build();
-// Resolved before running: RunAsync disposes the host's service provider on the way out.
+var host = builder.Build();
+// Resolved before running: disposing the host disposes its service provider.
 var exit = host.Services.GetRequiredService<ExitCodeHolder>();
-await host.RunAsync();
+// Not host.RunAsync(): that disposes the host, which flushes telemetry, with no time limit.
+// BoundedShutdown caps the flush so the run always exits inside Azure's 300 s replica timeout.
+await BoundedShutdown.RunAsync(host, BoundedShutdown.FlushBudget, Console.Error);
 
 // Only --once sets a code; the loop exits 0 on a normal shutdown.
 return Environment.ExitCode = exit.Code;

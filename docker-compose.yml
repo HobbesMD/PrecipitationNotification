@@ -6,6 +6,16 @@
 # reuse it anywhere else. A location row here still holds real coordinates, so
 # the database is not world-readable either. Production credentials come from the
 # environment and are never committed.
+#
+# Also here: the .NET Aspire dashboard, a local OpenTelemetry viewer (traces, logs
+# and metrics held in memory; nothing persists across restarts). To see the
+# Worker's telemetry locally:
+#
+#   docker compose up -d aspire-dashboard
+#   OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 dotnet run --project src/Worker -- --once
+#
+# then open http://localhost:18888. Production exports to Grafana Cloud instead
+# (deploy/azure/README.md, "Block 6").
 services:
   postgres:
     # Same major version as the Testcontainers fixture (tests/Shared/PostgresFixture.cs).
@@ -24,6 +34,25 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+  aspire-dashboard:
+    # Pinned, never :latest: a moving tag changes what you debug against without a
+    # commit saying so. 13.6.2 was the newest release on MCR when this was added.
+    image: mcr.microsoft.com/dotnet/aspire-dashboard:13.6.2
+    environment:
+      # Unsecured means no login token for the UI and no API key for OTLP. That is
+      # safe ONLY because every port below binds 127.0.0.1: nothing off this machine
+      # can reach it. Drop the localhost binding and anyone on the network could
+      # read your traces and push fake ones.
+      DASHBOARD__FRONTEND__AUTHMODE: Unsecured
+      DASHBOARD__OTLP__AUTHMODE: Unsecured
+    ports:
+      # 127.0.0.1 only, as for postgres. Container 18888 is the UI.
+      - "127.0.0.1:18888:18888"
+      # OTLP gRPC: host 4317 -> container 18889.
+      - "127.0.0.1:4317:18889"
+      # OTLP HTTP: host 4318 -> container 18890.
+      - "127.0.0.1:4318:18890"
 
 volumes:
   precip-pgdata:

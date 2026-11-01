@@ -53,9 +53,18 @@ Required:
 | `ConnectionStrings__Precip` | Neon connection string; stored as the job secret `db-conn` (it carries the password) |
 | `PRECIP_NTFY_TOPIC` | Stored as the job secret `ntfy-topic` |
 | `PRECIP_USER_AGENT` | Contact info for NWS; plain env var |
+| `PRECIP_HEARTBEAT_URL` | healthchecks.io ping URL; stored as the job secret `heartbeat-url` (see [Block 6](#block-6-heartbeat-and-telemetry)) |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Grafana Cloud OTLP gateway URL; plain env var |
+| `OTEL_EXPORTER_OTLP_HEADERS` | `Authorization=Basic%20...`; stored as the job secret `otlp-headers` |
 
 Optional (defaults): `AZ_RG` (`rg-precip`), `AZ_LOCATION` (`eastus`),
 `AZ_ENV` (`cae-precip`), `AZ_JOB` (`job-precip-nightly`).
+
+The script also sets `OTEL_EXPORTER_OTLP_PROTOCOL` (`http/protobuf`),
+`OTEL_SERVICE_NAME` (`precip-worker`) and `OTEL_RESOURCE_ATTRIBUTES`
+(`service.version` taken from the image's sha tag or digest, plus
+`deployment.environment.name=production`), so every trace names the commit that
+produced it.
 
 `PRECIP_API_KEY` and `Worker__Interval` are local-only (the admin API and the
 long-running mode). They never go to Azure.
@@ -81,7 +90,7 @@ load_env() {   # usage: load_env FILE...   later files win
     while IFS='=' read -r k v; do
       v="${v#\"}"; v="${v%\"}"          # strip one pair of quotes, as the app does
       export "$k=$v"
-    done < <(grep -E '^(PRECIP_[A-Z_]+|ConnectionStrings__[A-Za-z]+|Worker__[A-Za-z]+)=' "$f" | tr -d '\r')
+    done < <(grep -E '^(PRECIP_[A-Z_]+|OTEL_[A-Z_]+|ConnectionStrings__[A-Za-z]+|Worker__[A-Za-z]+)=' "$f" | tr -d '\r')
   done
 }
 ```
@@ -93,6 +102,83 @@ parentheses, which `source` would try to execute, and `read -r k v` keeps the
 `=` and `;` inside a connection string intact. The app's own `.env` loader
 never overwrites a variable that is already set, so exporting the Neon string
 this way beats the local one in `.env`.
+
+## Block 6: heartbeat and telemetry
+
+One-time manual setup, done before the first deploy that includes Block 6.
+`deploy.sh` refuses to run without all three values: there is no opt-out, because
+a job with no dead-man's switch is exactly the silent failure this block exists to
+prevent.
+
+### healthchecks.io (the dead-man's switch)
+
+1. Create a free account and a check. Schedule: cron `0 23 * * *`, time zone
+   `UTC`, grace time 1 hour. That matches the job's own cron.
+2. Copy the check's ping URL into your gitignored `.env` as
+   `PRECIP_HEARTBEAT_URL=...`. **It is a secret:** anyone holding it can report
+   "healthy" for you, so it goes in the job as the secret `heartbeat-url`, never
+   in source or a log.
+3. Add two integrations: **email** and **ntfy**. For ntfy use a different long
+   random topic from the alerts topic. Email is the second channel on purpose: a
+   dead ntfy can't report that it is dead.
+
+What a run sends: `/start` when it begins, then `/<exit code>` when it ends
+(`/0` is success). A non-zero code alerts immediately. A missing ping, because the
+job never started or hung, alerts only after the grace period. Azure's one retry
+(`replicaRetryLimit` 1) can therefore show "down" after a failed first attempt,
+then "up" when the retry succeeds. That is correct, not a bug.
+
+### Grafana Cloud (traces)
+
+1. Create a free stack and open its **OpenTelemetry (OTLP)** connection tile.
+2. Set `OTEL_EXPORTER_OTLP_ENDPOINT` in `.env` to the gateway URL it shows.
+3. Generate a token with write-only scopes (no read), and set
+   `OTEL_EXPORTER_OTLP_HEADERS` to `Authorization=Basic%20<base64 of instanceId:token>`.
+   Note the `%20`: the .NET exporter needs the space URL-encoded. Build the base64
+   without putting the token on a command line or in history, e.g. read it with
+   `read -rs` and pipe it through `base64 -w0`.
+
+Then deploy as in [Running the script](#running-the-script).
+
+### Verify after deploying
+
+```bash
+az containerapp job show -n "$AZ_JOB" -g "$AZ_RG" --query "properties.configuration.secrets[].name" -o tsv
+az containerapp job start -n "$AZ_JOB" -g "$AZ_RG"
+```
+
+`job show` lists `heartbeat-url` and `otlp-headers` by name only, never values.
+After the execution finishes: in Grafana, Explore, the Tempo data source, search
+service `precip-worker` and find the trace; in healthchecks.io the check turns
+green.
+
+### Drill: prove the alarm reaches your phone
+
+Run once against dead providers so the run exits 2, and confirm the
+healthchecks.io alert reaches the phone. `az containerapp job start` takes
+`--image`, `--args` and `--env-vars` (per the Azure CLI reference), so the override
+applies to that one execution and the deployed job is never edited:
+
+```bash
+az containerapp job start -n "$AZ_JOB" -g "$AZ_RG" \
+  --image "$IMAGE" --args=--once \
+  --env-vars Nws__BaseUrl=https://127.0.0.1:9/ OpenMeteo__BaseUrl=https://127.0.0.1:9/
+```
+
+Check the execution's logs. An override may replace the container's environment
+rather than merge into it. If the run fails for missing configuration (connection
+string, heartbeat URL) instead of reaching the dead host, restate the full set of
+variables, using `secretref:` for the secrets as `deploy.sh` does. If your CLI
+version rejects `--env-vars` on `start`, fall back to a temporary
+`az containerapp job update --set-env-vars Nws__BaseUrl=... OpenMeteo__BaseUrl=...`,
+start the job, then revert with
+`--remove-env-vars Nws__BaseUrl OpenMeteo__BaseUrl` (re-running `deploy.sh` also
+works: its `--replace-env-vars` drops them).
+
+Expected: exit 2 and an immediate "down" alert on the phone and by email. Then
+start a normal run (`az containerapp job start -n "$AZ_JOB" -g "$AZ_RG"`) and
+watch the check return to "up". If the alert only arrives after the grace period,
+the `/<exit code>` ping isn't reaching healthchecks.io; read the logs.
 
 ## Migrate
 
