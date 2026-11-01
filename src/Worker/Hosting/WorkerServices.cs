@@ -5,11 +5,13 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
 using Persistence;
 using Worker.Alerts;
+using Worker.Heartbeat;
 using Worker.Notifications;
 using Worker.Nws;
 using Worker.OpenMeteo;
 using Worker.Pass;
 using Worker.Resilience;
+using Worker.Telemetry;
 
 namespace Worker.Hosting;
 
@@ -114,6 +116,12 @@ internal static class WorkerServices
         services.AddSingleton(new PassOptions(dryRun) { Deadline = deadline, HardDeadline = hardDeadline });
         services.AddScoped<INightlyPass, NightlyPass>();
         services.AddSingleton<ExitCodeHolder>();
+
+        // Traces, metrics and logs over OTLP, redacted before export (Block 6). Exports nothing
+        // unless OTEL_EXPORTER_OTLP_ENDPOINT is set, so tests and bare local runs are unaffected.
+        services.AddWorkerTelemetry(configuration);
+        // The dead-man's switch. Only OncePassService resolves it; the loop never pings.
+        services.AddHeartbeat(config, dryRun);
         return services;
     }
 
@@ -250,6 +258,8 @@ internal static class WorkerServices
     {
         services.TryAddSingleton(TimeProvider.System);
         services.TryAddSingleton(new PassOptions());
+        // A host built without AddWorkerServices (tests) gets no heartbeat.
+        services.TryAddSingleton<IHeartbeat, NoOpHeartbeat>();
         return services;
     }
 }

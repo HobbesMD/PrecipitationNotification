@@ -1,6 +1,7 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Worker.Heartbeat;
 using Worker.Pass;
 
 namespace Worker.Hosting;
@@ -77,17 +78,28 @@ internal static class PassBackstop
 /// <c>--once</c>: run one <see cref="INightlyPass"/>, record its exit code, stop the host. This is the
 /// scheduled-job shape (Azure Container Apps Job): start, do the night's work, exit. The pass runs
 /// under <see cref="PassBackstop"/>, so a pass that runs too long still exits 7 by itself.
+///
+/// <para>
+/// The heartbeat brackets the pass: a start ping before it, and a finish ping carrying the exit
+/// code on every path that reaches <c>finally</c> (success, failure, the backstop, SIGTERM, a
+/// crash). Both use <see cref="CancellationToken.None"/> on purpose: a stopping host must still
+/// report how the run ended. <see cref="IHeartbeat"/> never throws and bounds itself, so it cannot
+/// change the exit code or the pass's budget.
+/// </para>
 /// </summary>
 internal sealed class OncePassService(
     IServiceScopeFactory scopes,
     PassOptions options,
     TimeProvider clock,
     ExitCodeHolder exit,
+    IHeartbeat heartbeat,
     IHostApplicationLifetime lifetime,
     ILogger<OncePassService> log) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // Outside the backstop's clock: PassBackstop starts timing the pass, not the ping.
+        await heartbeat.StartAsync(CancellationToken.None);
         try
         {
             exit.Code = await PassBackstop.RunAsync(scopes, options, clock, log, stoppingToken);
@@ -105,6 +117,7 @@ internal sealed class OncePassService(
         }
         finally
         {
+            await heartbeat.FinishAsync(exit.Code, CancellationToken.None);
             lifetime.StopApplication();
         }
     }
