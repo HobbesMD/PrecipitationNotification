@@ -157,6 +157,11 @@ it hides the reasoning.
 - The suite was mutation-checked: swapping first/second, removing the gap
   shift, `>`→`>=`, and UTC-date-for-today each made tests fail.
 
+**In production:** on the real fall-back night, a manual run on 2026-11-01
+(execution `job-precip-nightly-s0crjtz`, Block 5 image) logged
+`Night 2026-10-31: 2026-11-01T00:00:00Z -> 2026-11-01T12:00:00Z (length 12:00:00)`.
+That's the 12-hour window this entry predicted, computed live in a UTC container.
+
 #### D4. Impossible case throws instead of falling back
 
 **Decision:** if neither yesterday's nor today's window ends after "now",
@@ -1508,3 +1513,9 @@ It found one high-severity defect and two medium ones.
 **Noted, not changed:**
 - **A location NWS has never resolved takes Open-Meteo's zone, and that zone isn't saved.** Once NWS resolves it, its zone could differ, and so could the night key. That can't happen on the 23:00 UTC schedule, and the different keys belong to windows that don't overlap, so no night gets two alerts.
 - **Two timeouts now race.** With the client timeout and Polly's total both at 30 s, an exhausted call fails with either `TimeoutRejectedException` or a client timeout. Every caller treats both the same.
+
+**In production (2026-11-01):**
+- `--migrate` applied `AddAlertProvider` to Neon before the deploy. The Block 4 image kept working against the new column.
+- `deploy.sh` deployed image `fdc63261b157` (`--once`, cron 23:00 UTC, 300 s timeout, one retry; secrets `db-conn` and `ntfy-topic`).
+- A manual start at the real threshold (`job-precip-nightly-s0crjtz`) took the NWS path, evaluated the fall-back night's 12-hour window, found no hits and sent nothing. No GSSAPI or Polly noise appeared in its logs.
+- The fallback itself was proven locally (D36). Forcing an NWS outage in production would mean editing the job's config for a drill, which isn't worth the risk for a one-location job.
