@@ -11,7 +11,7 @@ internal static class ExitCodes
     /// <summary>No active locations, a location without a rule, bad startup config, or an unexpected crash.</summary>
     public const int Failure = 1;
 
-    /// <summary>NWS lookup or fetch failed (including an unknown time zone id in the response).</summary>
+    /// <summary>NWS lookup or fetch failed (including an unknown time zone id) and so did the fallback provider.</summary>
     public const int Nws = 2;
 
     /// <summary>Publishing the alert failed.</summary>
@@ -25,4 +25,12 @@ internal static class ExitCodes
 
     /// <summary>The database is unreachable or has pending migrations; <c>--migrate</c> failed.</summary>
     public const int Database = 6;
+
+    /// <summary>
+    /// The soft pass deadline passed before every location was started (and no earlier location
+    /// had failed, in which case that failure's code wins); the skipped locations are named in the
+    /// log. Also: the hard deadline (<see cref="PassOptions.HardDeadline"/>) cancelled the pass
+    /// mid-flight, which always wins, since the pass never got to return a code of its own.
+    /// </summary>
+    public const int PassDeadline = 7;
 }

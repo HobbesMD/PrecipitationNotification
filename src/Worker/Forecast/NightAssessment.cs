@@ -31,6 +31,13 @@ internal sealed record NightAssessment(
     /// non-empty alongside hits: gaps with no hits throw <see cref="IncompleteForecastException"/>.
     /// </summary>
     public IReadOnlyList<ForecastGap> Gaps { get; init; } = [];
+
+    /// <summary>
+    /// Which provider's forecast this night was judged on (one of <see cref="Providers"/>).
+    /// An init property with an NWS default, not a constructor parameter, so every existing
+    /// construction keeps compiling and means what it meant before the fallback existed.
+    /// </summary>
+    public string Provider { get; init; } = Providers.Nws;
 }
 
 /// <summary>A stretch of the evaluated range with no hourly forecast data.</summary>

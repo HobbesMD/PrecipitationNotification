@@ -63,6 +63,10 @@ namespace Persistence.Migrations
                         .HasColumnType("integer")
                         .HasColumnName("peak_probability");
 
+                    b.Property<string>("Provider")
+                        .HasColumnType("text")
+                        .HasColumnName("provider");
+
                     b.Property<DateTimeOffset?>("SentAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("sent_at");

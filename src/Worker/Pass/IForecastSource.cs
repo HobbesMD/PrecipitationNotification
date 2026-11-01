@@ -1,3 +1,4 @@
+using Worker.Forecast;
 using Worker.Nws;
 
 namespace Worker.Pass;
@@ -9,12 +10,12 @@ namespace Worker.Pass;
 internal interface IForecastSource
 {
     /// <exception cref="NwsPointStaleException">The cached point no longer works; refresh it and retry.</exception>
-    Task<NwsForecast> GetForecastAsync(NwsPoint point, CancellationToken ct);
+    Task<ProviderForecast> GetForecastAsync(NwsPoint point, CancellationToken ct);
 }
 
 /// <summary><see cref="IForecastSource"/> over <see cref="NwsClient"/>.</summary>
 internal sealed class NwsForecastSource(NwsClient nws) : IForecastSource
 {
-    public Task<NwsForecast> GetForecastAsync(NwsPoint point, CancellationToken ct) =>
+    public Task<ProviderForecast> GetForecastAsync(NwsPoint point, CancellationToken ct) =>
         nws.GetForecastAsync(point, ct);
 }

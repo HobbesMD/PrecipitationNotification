@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Worker.Forecast;
 using Worker.Nws;
 
 namespace Worker.Tests;
@@ -9,7 +10,7 @@ public class NwsMappingTests
 
     private static readonly NwsPoint Point = new("America/New_York", "https://example.test/hourly", null);
 
-    private static NwsForecast MapFixture()
+    private static ProviderForecast MapFixture()
     {
         var props = FixtureFiles.Load<PointResponse>(Dir + "points.json").Properties!;
         var point = new NwsPoint(props.TimeZone!, props.ForecastHourly!, props.ForecastGridData);
@@ -95,9 +96,9 @@ public class NwsMappingTests
 
     private static readonly GridSeries Ok = new("wmoUnit:mm", []);
 
-    private static NwsForecast MapGrid(GridpointProperties? grid) => NwsMapper.ToForecast(Point, [], grid);
+    private static ProviderForecast MapGrid(GridpointProperties? grid) => NwsMapper.ToForecast(Point, [], grid);
 
-    private static void AssertUnavailable(NwsForecast forecast, string reasonContains)
+    private static void AssertUnavailable(ProviderForecast forecast, string reasonContains)
     {
         Assert.Null(forecast.Amounts);
         Assert.Contains(reasonContains, forecast.AmountsUnavailableReason);

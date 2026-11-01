@@ -28,6 +28,8 @@ internal sealed class PassHarness : IAsyncDisposable
 
     public FakeForecastSource Forecasts { get; } = new();
 
+    public FakeFallbackSource Fallback { get; } = new();
+
     public LogCapture Logs { get; } = new();
 
     public FakeTimeProvider Clock { get; } =
@@ -45,7 +47,8 @@ internal sealed class PassHarness : IAsyncDisposable
     /// </summary>
     public async Task<int> AddLocationAsync(
         string name, int threshold = 0, bool active = true, bool withRule = true,
-        decimal latitude = 40.7128m, decimal longitude = -74.0060m)
+        decimal latitude = 40.7128m, decimal longitude = -74.0060m,
+        string? timeZoneId = null)
     {
         var location = new Location
         {
@@ -53,6 +56,7 @@ internal sealed class PassHarness : IAsyncDisposable
             Latitude = latitude,
             Longitude = longitude,
             IsActive = active,
+            TimeZoneId = timeZoneId,
             CreatedAt = Clock.GetUtcNow(),
             AlertRule = withRule
                 ? new Persistence.AlertRule
@@ -68,11 +72,13 @@ internal sealed class PassHarness : IAsyncDisposable
         return location.Id;
     }
 
-    public Task<int> RunAsync(bool dryRun = false, CancellationToken ct = default)
+    public Task<int> RunAsync(bool dryRun = false, CancellationToken ct = default, TimeSpan? deadline = null)
     {
         using var factory = LoggerFactory.Create(b => b.SetMinimumLevel(LogLevel.Trace).AddProvider(Logs));
         var pass = new NightlyPass(
-            Db, Cache, Forecasts, Ledger, Clock, new PassOptions(dryRun), new Logger<NightlyPass>(factory));
+            Db, Cache, Forecasts, Fallback, Ledger, Clock,
+            new PassOptions(dryRun) { Deadline = deadline ?? PassOptions.DefaultDeadline },
+            new Logger<NightlyPass>(factory));
         return pass.RunAsync(ct);
     }
 

@@ -50,9 +50,9 @@ internal sealed class FakeForecastSource : IForecastSource
     public List<FetchCall> Calls { get; } = [];
 
     /// <summary>Default: the full captured forecast.</summary>
-    public Func<FetchCall, NwsForecast> Handler { get; set; } = _ => FixtureForecast.Full();
+    public Func<FetchCall, ProviderForecast> Handler { get; set; } = _ => FixtureForecast.Full();
 
-    public Task<NwsForecast> GetForecastAsync(NwsPoint point, CancellationToken ct)
+    public Task<ProviderForecast> GetForecastAsync(NwsPoint point, CancellationToken ct)
     {
         var parts = new Uri(point.ForecastHourlyUrl).AbsolutePath.Trim('/').Split('/');
         var id = int.Parse(parts[0]);
@@ -60,6 +60,29 @@ internal sealed class FakeForecastSource : IForecastSource
         var call = new FetchCall(id, int.Parse(parts[1][1..]), attempt);
         Calls.Add(call);
         return Task.FromResult(Handler(call));
+    }
+}
+
+/// <summary>
+/// The fallback provider. By default it is down (throws), so a test that doesn't care about the
+/// fallback sees the NWS failure's exit code, as before Block 5.
+/// </summary>
+internal sealed class FakeFallbackSource : IFallbackForecastSource
+{
+    /// <summary>The location ids the fallback was asked about, in order.</summary>
+    public List<int> Calls { get; } = [];
+
+    public Func<Location, ProviderForecast> Handler { get; set; } =
+        _ => throw new HttpRequestException("fallback down");
+
+    /// <summary>The captured forecast relabelled as Open-Meteo, in the given zone.</summary>
+    public static ProviderForecast OpenMeteo(string timeZoneId = "America/New_York") =>
+        FixtureForecast.Full() with { Provider = Providers.OpenMeteo, TimeZoneId = timeZoneId };
+
+    public Task<ProviderForecast> GetForecastAsync(Location location, CancellationToken ct)
+    {
+        Calls.Add(location.Id);
+        return Task.FromResult(Handler(location));
     }
 }
 
@@ -71,6 +94,9 @@ internal sealed class FakeAlertLedger : IAlertLedger
     public List<(int LocationId, DateOnly Night)> IsSentCalls { get; } = [];
 
     public List<(int LocationId, DateOnly Night, ComposedMessage Message)> SendCalls { get; } = [];
+
+    /// <summary>The assessment of each <see cref="SendOnceAsync"/> call, parallel to <see cref="SendCalls"/>.</summary>
+    public List<NightAssessment> Assessments { get; } = [];
 
     public int TotalCalls => IsSentCalls.Count + SendCalls.Count;
 
@@ -87,6 +113,7 @@ internal sealed class FakeAlertLedger : IAlertLedger
         int locationId, DateOnly nightDate, NightAssessment assessment, ComposedMessage msg, CancellationToken ct)
     {
         SendCalls.Add((locationId, nightDate, msg));
+        Assessments.Add(assessment);
         if (Sent.Contains((locationId, nightDate)))
             return SendOutcome.AlreadySent;
 
@@ -147,7 +174,7 @@ internal static class FixtureForecast
     private const string Dir = "nws/2026-10-29T1900Z_pre-dst-fallback/";
 
     /// <summary>All 156 hours, 2026-10-29 14:00 EDT onward. Every PoP is under 50.</summary>
-    public static NwsForecast Full()
+    public static ProviderForecast Full()
     {
         var points = FixtureFiles.Load<PointResponse>(Dir + "points.json");
         var hourly = FixtureFiles.Load<HourlyForecastResponse>(Dir + "forecast-hourly.json");
@@ -158,7 +185,7 @@ internal static class FixtureForecast
     }
 
     /// <summary>The forecast cut off: no hours starting at or after <paramref name="cut"/>.</summary>
-    public static NwsForecast Truncated(DateTimeOffset cut)
+    public static ProviderForecast Truncated(DateTimeOffset cut)
     {
         var full = Full();
         return full with { Hours = full.Hours.Where(h => h.Start < cut).ToList() };

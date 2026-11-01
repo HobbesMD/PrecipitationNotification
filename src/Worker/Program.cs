@@ -13,9 +13,10 @@ using Worker.Pass;
 //   --dry-run     with --once or the loop: compose and print the message, never publish,
 //                 never touch alert_history.
 //
-// Exit codes: 0 ok, 1 no active locations / bad config / unexpected, 2 NWS, 3 ntfy publish,
-// 4 incomplete forecast, 5 runtime self-check, 6 database unreachable, migrations pending or
-// --migrate failed. See ExitCodes.
+// Exit codes: 0 ok, 1 no active locations / bad config / unexpected, 2 both forecast providers
+// failed (NWS and the Open-Meteo fallback), 3 ntfy publish, 4 incomplete forecast, 5 runtime
+// self-check, 6 database unreachable, migrations pending or --migrate failed, 7 pass deadline
+// reached with locations left unevaluated, or the hard deadline cancelled the pass. See ExitCodes.
 
 // Before .env and config on purpose: the check needs neither, so CI can run it
 // against the built image with nothing set.
@@ -57,7 +58,17 @@ catch (InvalidOperationException ex)
 var once = args.Contains("--once");
 var builder = Host.CreateApplicationBuilder(args);
 
-builder.Services.AddWorkerServices(config, dryRun: args.Contains("--dry-run"));
+try
+{
+    // Reads Resilience:*, Worker:PassDeadline and Worker:HardDeadline; a malformed or invalid value
+    // must fail like any other config error.
+    builder.Services.AddWorkerServices(config, dryRun: args.Contains("--dry-run"));
+}
+catch (InvalidOperationException ex)
+{
+    Console.Error.WriteLine($"Config error: {ex.Message}");
+    return ExitCodes.Failure;
+}
 if (once)
 {
     builder.Services.AddOncePass();

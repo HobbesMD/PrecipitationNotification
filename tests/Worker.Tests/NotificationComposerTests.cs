@@ -14,6 +14,17 @@ public class NotificationComposerTests
     private static HourlyForecast Hour(string iso, int prob = 80, string text = "Rain", int temp = 45) =>
         new(DateTimeOffset.Parse(iso), TimeSpan.FromHours(1), prob, text, temp, "F");
 
+    [Fact]
+    public void Hour_without_a_temperature_omits_it_instead_of_printing_zero()
+    {
+        var hit = Hour("2026-11-01T03:00:00-05:00", text: "Light rain") with { Temperature = 0, TemperatureUnit = "" };
+
+        var body = NotificationComposer.Compose(Night(hits: [hit]), NewYork).Body;
+
+        Assert.Contains("80%, Light rain", body);
+        Assert.DoesNotContain("Light rain, 0", body);
+    }
+
     private static NightAssessment Night(
         PrecipKind kind = PrecipKind.Rain,
         double liquid = 0, double snow = 0, double ice = 0,
@@ -222,4 +233,24 @@ public class NotificationComposerTests
         Assert.All(msg.Tags, c => Assert.True(c <= 0x7F, $"non-ASCII char in tags: U+{(int)c:X4}"));
         Assert.Contains(text, msg.Body);
     }
+
+    // ---- Provider attribution (D33) ----
+
+    [Fact]
+    public void Open_meteo_alert_ends_with_the_source_line_and_leaves_the_title_alone()
+    {
+        var nws = NotificationComposer.Compose(Night(liquid: 0.42), NewYork);
+        var fallback = NotificationComposer.Compose(
+            Night(liquid: 0.42) with { Provider = Providers.OpenMeteo }, NewYork);
+
+        Assert.EndsWith("\nSource: Open-Meteo (NWS unavailable)", fallback.Body);
+        Assert.Equal(nws.Title, fallback.Title);
+        Assert.Equal(nws.Tags, fallback.Tags);
+        Assert.Equal(nws.Priority, fallback.Priority);
+        Assert.Equal(nws.Body + "\nSource: Open-Meteo (NWS unavailable)", fallback.Body);
+    }
+
+    [Fact]
+    public void Nws_alert_has_no_source_line() =>
+        Assert.DoesNotContain("Source:", NotificationComposer.Compose(Night(liquid: 0.42), NewYork).Body);
 }
