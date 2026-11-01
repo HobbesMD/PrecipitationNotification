@@ -1,8 +1,11 @@
 <Solution>
   <Folder Name="/src/">
+    <Project Path="src/Api/Api.csproj" />
+    <Project Path="src/Persistence/Persistence.csproj" />
     <Project Path="src/Worker/Worker.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/Api.Tests/Api.Tests.csproj" />
     <Project Path="tests/Worker.Tests/Worker.Tests.csproj" />
   </Folder>
 </Solution>

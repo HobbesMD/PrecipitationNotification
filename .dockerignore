@@ -1,4 +1,4 @@
-# .env holds secrets (ntfy topic, contact info) and must never enter an image layer.
+# .env holds secrets (ntfy topic, DB connection string, API key, contact info) and must never enter an image layer.
 # **/ so a .env anywhere in the tree is excluded, not just at the root.
 **/.env
 **/.env.*
@@ -15,4 +15,6 @@
 tests
 tools
 deploy
+# The dev database definition (carries a dev-only password) has no place in the image.
+docker-compose*.yml
 *.md

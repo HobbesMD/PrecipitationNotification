@@ -41,8 +41,13 @@ public class NwsClientTests
             [GridUrl] = grid ?? Json(FixtureFiles.Read(Dir + "gridpoint.json")),
         })));
 
-    private static Task<NwsForecast> Get(NwsClient client, CancellationToken? ct = null) =>
-        client.GetForecastAsync("40.7128,-74.0060", ct ?? TestContext.Current.CancellationToken);
+    // Resolve then fetch, as the nightly pass does on a cold cache.
+    private static async Task<NwsForecast> Get(NwsClient client, CancellationToken? ct = null)
+    {
+        var token = ct ?? TestContext.Current.CancellationToken;
+        var point = await client.ResolvePointAsync("40.7128,-74.0060", token);
+        return await client.GetForecastAsync(point, token);
+    }
 
     [Fact]
     public async Task All_ok_returns_hours_and_amounts()
@@ -134,6 +139,37 @@ public class NwsClientTests
     [Fact]
     public async Task Hourly_500_throws() =>
         await Assert.ThrowsAsync<HttpRequestException>(() => Get(Client(hourly: Status(HttpStatusCode.InternalServerError))));
+
+    [Fact]
+    public async Task Hourly_404_throws_stale_point() =>
+        await Assert.ThrowsAsync<NwsPointStaleException>(() => Get(Client(hourly: Status(HttpStatusCode.NotFound))));
+
+    [Fact]
+    public async Task Resolve_point_returns_zone_and_urls_from_points()
+    {
+        var point = await Client().ResolvePointAsync("40.7128,-74.0060", TestContext.Current.CancellationToken);
+
+        Assert.Equal("America/New_York", point.TimeZoneId);
+        Assert.Equal(HourlyUrl, point.ForecastHourlyUrl);
+        Assert.Equal(GridUrl, point.ForecastGridDataUrl);
+    }
+
+    // Moved here from NwsMappingTests: the zone is now required when the point is resolved.
+    [Fact]
+    public async Task Points_without_time_zone_throws()
+    {
+        var points = FixtureFiles.Read(Dir + "points.json").Replace("\"timeZone\"", "\"timeZoneRenamed\"");
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Get(Client(points: Json(points))));
+    }
+
+    [Fact]
+    public async Task Points_without_hourly_url_throws()
+    {
+        var points = FixtureFiles.Read(Dir + "points.json").Replace("\"forecastHourly\"", "\"forecastHourlyRenamed\"");
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Get(Client(points: Json(points))));
+    }
 
     [Fact]
     public async Task Points_500_throws() =>

@@ -7,14 +7,15 @@ public class NwsMappingTests
 {
     private const string Dir = "nws/2026-10-29T1900Z_pre-dst-fallback/";
 
-    private static readonly PointProperties Point = new(null, "America/New_York", null);
+    private static readonly NwsPoint Point = new("America/New_York", "https://example.test/hourly", null);
 
     private static NwsForecast MapFixture()
     {
-        var points = FixtureFiles.Load<PointResponse>(Dir + "points.json");
+        var props = FixtureFiles.Load<PointResponse>(Dir + "points.json").Properties!;
+        var point = new NwsPoint(props.TimeZone!, props.ForecastHourly!, props.ForecastGridData);
         var hourly = FixtureFiles.Load<HourlyForecastResponse>(Dir + "forecast-hourly.json");
         var grid = FixtureFiles.Load<GridpointResponse>(Dir + "gridpoint.json");
-        return NwsMapper.ToForecast(points.Properties!, hourly.Properties!.Periods!, grid.Properties);
+        return NwsMapper.ToForecast(point, hourly.Properties!.Periods!, grid.Properties);
     }
 
     private static ForecastPeriod Period(string pop) =>
@@ -52,13 +53,6 @@ public class NwsMappingTests
     public void Time_zone_comes_from_points()
     {
         Assert.Equal("America/New_York", MapFixture().TimeZoneId);
-    }
-
-    [Fact]
-    public void Missing_time_zone_throws()
-    {
-        Assert.Throws<InvalidOperationException>(() =>
-            NwsMapper.ToForecast(new PointProperties(null, null, null), [], null));
     }
 
     [Fact]
