@@ -88,7 +88,7 @@ side projects die.
 | 7 | CI/CD | Actions: build → test → container → push → deploy. |
 | 8 | README as design doc | What I built, what I traded away, why. Diagrams. |
 
-**Current block: 3.** (Block 1 done 2026-10-29 — notification confirmed on phone. Block 2 done 2026-10-29 — PR #1.)
+**Current block: 5.** (Block 1 done 2026-10-29 — notification confirmed on phone. Block 2 done 2026-10-29 — PR #1. Block 3 done 2026-10-29 — PR #2. Block 4 done 2026-10-31 — PR #3, merged after two clean scheduled runs, including the DST fall-back night.)
 
 Block 1 leaves debt *on purpose* — hardcoded coordinates, naive time handling,
 topic in source, no tests, no retry. Block 2 fixes it. Don't fix it early; the
@@ -96,13 +96,22 @@ commit where it was wrong is part of the story.
 
 ## Config
 
-Set before Block 1, none committed:
+None committed. Env vars (the Azure job gets them as secrets):
 
-- `PRECIP_LAT` / `PRECIP_LON` — 4 decimal places max (NWS limit)
+- `ConnectionStrings__Precip` — Postgres (Neon in prod); Worker and Api
 - `PRECIP_NTFY_TOPIC` — long and random
 - `PRECIP_USER_AGENT` — contact info for NWS
-- Overnight window: 8:00 PM → 7:00 AM local (America/New_York)
-- Block 1 threshold: any hour in window with `probabilityOfPrecipitation >= 50`
+- `PRECIP_NTFY_BASE_URL` — optional, defaults to `https://ntfy.sh`
+- `PRECIP_API_KEY` — Api only, at least 32 chars
+
+Per-location settings are DB rows (since Block 4), managed through the API:
+
+- Coordinates — 4 decimal places max (NWS limit)
+- Overnight window — 8:00 PM → 7:00 AM local for Home
+- Threshold — any hour in window with `probabilityOfPrecipitation >= 50`
+- Time zone — not configured; taken from NWS `/points` `properties.timeZone`
+  and cached on the row. Don't name a location's zone in the repo; it hints at
+  where the coordinates are.
 
 ## Conventions
 
