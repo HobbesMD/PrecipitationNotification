@@ -1627,7 +1627,12 @@ It found one high-severity defect and two medium ones.
   - `Exception_event_added_by_hand_with_a_stack_trace_drops_the_span`, `Event_with_a_tag_off_the_allowlist_drops_the_span`, `Link_with_tags_drops_the_span`
 - `WorkerTelemetryTests.Exporter_added_later_only_sees_the_redacted_http_span`: a real HttpClient request to `/points/40.7128,-74.006`, captured by an exporter registered *after* the redactor.
 - `NightlyPassTests.The_time_zone_is_logged_only_at_debug`
-- A whole-pass leak test over all three signals follows in Wave 2.
+- `TelemetryLeakTests`, the guarantee: the real `--once` host, end to end (WireMock for NWS, Open-Meteo, ntfy and healthchecks.io; real Postgres; in-memory exporters added after the redactor, as any exporter would be). Everything exported (span names, tags, statuses, events, links, baggage and resource; metric names and point tags; log messages, attributes, exceptions and scopes) is flattened and searched for the topic, the heartbeat UUID, the database password, the coordinates in every format, the grid cell and the time zone.
+  - `Alert_path_has_the_intended_trace_shape_and_leaks_nothing`: it also asserts the trace tree, `{redacted}` URLs and the heartbeat's `/start` then `/0`, so it can't pass by exporting nothing.
+  - `Fallback_and_publish_failure_leak_nothing`: Open-Meteo's coordinates-in-the-query URL, and ntfy's exception path.
+  - `Database_down_leaks_nothing`: Npgsql's exception events and logs. It runs as a role with a distinctive password, because the default `postgres` is a substring of every Npgsql span's name.
+  - `Negative_control_scanner_reports_a_secret_on_a_span_and_in_a_log_message`: proves the scanner can see.
+  - **Proven by breaking it:** moving the zone log back to Information fails two scenarios; unregistering the redactor fails three.
 
 #### D43. What's measured, and why metric tags never name a location
 
