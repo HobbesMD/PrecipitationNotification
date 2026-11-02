@@ -3,6 +3,7 @@
 # Safe to re-run: every resource is checked with `show`, then created or updated.
 #
 # Required env:  IMAGE  ConnectionStrings__Precip  PRECIP_NTFY_TOPIC  PRECIP_USER_AGENT
+#                PRECIP_HEARTBEAT_URL  OTEL_EXPORTER_OTLP_ENDPOINT  OTEL_EXPORTER_OTLP_HEADERS
 # Optional env:  AZ_RG (rg-precip)  AZ_LOCATION (eastus)  AZ_ENV (cae-precip)
 #                AZ_JOB (job-precip-nightly)  GHCR_USER + GHCR_PAT (both or neither)
 #
@@ -21,6 +22,12 @@ AZ_JOB="${AZ_JOB:-job-precip-nightly}"
 : "${ConnectionStrings__Precip:?set ConnectionStrings__Precip (the Neon connection string)}"
 : "${PRECIP_NTFY_TOPIC:?set PRECIP_NTFY_TOPIC}"
 : "${PRECIP_USER_AGENT:?set PRECIP_USER_AGENT (NWS rejects requests without contact info)}"
+# No opt-out: a production job without its dead-man's switch is the failure Block 6
+# exists to prevent (silence must not be ambiguous). The OTLP pair is required too,
+# so a deploy can't quietly ship a job nobody can see inside.
+: "${PRECIP_HEARTBEAT_URL:?set PRECIP_HEARTBEAT_URL (the healthchecks.io ping URL; see deploy/azure/README.md)}"
+: "${OTEL_EXPORTER_OTLP_ENDPOINT:?set OTEL_EXPORTER_OTLP_ENDPOINT (the Grafana Cloud OTLP gateway URL)}"
+: "${OTEL_EXPORTER_OTLP_HEADERS:?set OTEL_EXPORTER_OTLP_HEADERS (Authorization=Basic%20<base64>; see deploy/azure/README.md)}"
 
 # The job must pin a commit so every run is traceable to one: a git sha tag
 # (7-40 hex) or a digest. Branch-like tags (:main, :latest) are mutable on GHCR.
@@ -72,17 +79,37 @@ fi
 # is always before the 8 PM local window opens, in both halves of the DST year.
 CRON="0 23 * * *"
 
-# Secret names are limited to 20 chars. The ntfy topic and the DB connection string
-# (it carries the password) are secrets; env vars reference them with secretref:.
+# service.version for telemetry: the image's git sha tag, or the digest's hex for a
+# digest reference. Both forms are validated above, so the value is [0-9a-f] only.
+# That matters: OTEL_RESOURCE_ATTRIBUTES is a comma/equals-delimited list, and a
+# value containing either would corrupt it.
+if [[ "$IMAGE" =~ @sha256:([0-9a-f]{64})$ ]]; then
+  service_version="${BASH_REMATCH[1]}"
+else
+  service_version="${last_segment##*:}"
+fi
+
+# Secret names are limited to 20 chars. The ntfy topic, the DB connection string
+# (it carries the password), the heartbeat URL (anyone holding it can report
+# "healthy") and the OTLP auth header are secrets; env vars reference them with
+# secretref:. The OTLP endpoint is a plain URL with no credential in it.
 # Coordinates, window and threshold are rows in the database now, not job config.
 secrets=(
   "ntfy-topic=$PRECIP_NTFY_TOPIC"
   "db-conn=$ConnectionStrings__Precip"
+  "heartbeat-url=$PRECIP_HEARTBEAT_URL"
+  "otlp-headers=$OTEL_EXPORTER_OTLP_HEADERS"
 )
 env_vars=(
   "PRECIP_NTFY_TOPIC=secretref:ntfy-topic"
   "ConnectionStrings__Precip=secretref:db-conn"
   "PRECIP_USER_AGENT=$PRECIP_USER_AGENT"
+  "PRECIP_HEARTBEAT_URL=secretref:heartbeat-url"
+  "OTEL_EXPORTER_OTLP_HEADERS=secretref:otlp-headers"
+  "OTEL_EXPORTER_OTLP_ENDPOINT=$OTEL_EXPORTER_OTLP_ENDPOINT"
+  "OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf"
+  "OTEL_SERVICE_NAME=precip-worker"
+  "OTEL_RESOURCE_ATTRIBUTES=service.version=$service_version,deployment.environment.name=production"
 )
 
 # The job runs one pass and exits. `--args=--once` (with the `=`): the CLI's parser

@@ -119,7 +119,7 @@ internal sealed class NwsClient(HttpClient http, NwsOptions options, HttpClient?
         }
         catch (HttpRequestException ex)
         {
-            return (null, $"gridpoint fetch failed: {ex.Message}");
+            return (null, $"gridpoint fetch failed: {Redact.Urls(ex.Message)}");
         }
         catch (TaskCanceledException) when (!ct.IsCancellationRequested)
         {
@@ -127,12 +127,12 @@ internal sealed class NwsClient(HttpClient http, NwsOptions options, HttpClient?
         }
         catch (JsonException ex)
         {
-            return (null, $"gridpoint fetch failed: invalid JSON ({ex.Message})");
+            return (null, $"gridpoint fetch failed: invalid JSON ({Redact.Urls(ex.Message)})");
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
             // Amounts are optional (D11): no gridpoint failure mode may cost us the alert.
-            return (null, $"gridpoint fetch failed: {ex.GetType().Name}: {ex.Message}");
+            return (null, $"gridpoint fetch failed: {Redact.Describe(ex)}");
         }
     }
 }

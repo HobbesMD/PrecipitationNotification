@@ -1,7 +1,9 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Worker.Heartbeat;
 using Worker.Pass;
+using Worker.Telemetry;
 
 namespace Worker.Hosting;
 
@@ -60,7 +62,9 @@ internal static class PassBackstop
         {
             // A scope per pass: the DbContext must not outlive one run.
             await using var scope = scopes.CreateAsyncScope();
-            return await scope.ServiceProvider.GetRequiredService<INightlyPass>().RunAsync(linked.Token);
+            var code = await scope.ServiceProvider.GetRequiredService<INightlyPass>().RunAsync(linked.Token);
+            PassMetrics.RecordPass(code);
+            return code;
         }
         catch (OperationCanceledException) when (backstop.IsCancellationRequested && !stoppingToken.IsCancellationRequested)
         {
@@ -68,7 +72,15 @@ internal static class PassBackstop
                 "Pass hit the hard deadline of {HardDeadline}; in-flight work was cancelled. "
                 + "An interrupted send stays Pending and the next run resends it (D25).",
                 options.HardDeadline);
+            PassMetrics.RecordPass(ExitCodes.PassDeadline);
             return ExitCodes.PassDeadline;
+        }
+        catch
+        {
+            // A shutdown or a crash: --once exits 1 for both (OncePassService). Counted here, where
+            // every pass ends, so the deadline and shutdown nights are not missing from the metric.
+            PassMetrics.RecordPass(ExitCodes.Failure);
+            throw;
         }
     }
 }
@@ -77,17 +89,28 @@ internal static class PassBackstop
 /// <c>--once</c>: run one <see cref="INightlyPass"/>, record its exit code, stop the host. This is the
 /// scheduled-job shape (Azure Container Apps Job): start, do the night's work, exit. The pass runs
 /// under <see cref="PassBackstop"/>, so a pass that runs too long still exits 7 by itself.
+///
+/// <para>
+/// The heartbeat brackets the pass: a start ping before it, and a finish ping carrying the exit
+/// code on every path that reaches <c>finally</c> (success, failure, the backstop, SIGTERM, a
+/// crash). Both use <see cref="CancellationToken.None"/> on purpose: a stopping host must still
+/// report how the run ended. <see cref="IHeartbeat"/> never throws and bounds itself, so it cannot
+/// change the exit code or the pass's budget.
+/// </para>
 /// </summary>
 internal sealed class OncePassService(
     IServiceScopeFactory scopes,
     PassOptions options,
     TimeProvider clock,
     ExitCodeHolder exit,
+    IHeartbeat heartbeat,
     IHostApplicationLifetime lifetime,
     ILogger<OncePassService> log) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // Outside the backstop's clock: PassBackstop starts timing the pass, not the ping.
+        await PingAsync("start", () => heartbeat.StartAsync(CancellationToken.None));
         try
         {
             exit.Code = await PassBackstop.RunAsync(scopes, options, clock, log, stoppingToken);
@@ -105,7 +128,26 @@ internal sealed class OncePassService(
         }
         finally
         {
+            await PingAsync("finish", () => heartbeat.FinishAsync(exit.Code, CancellationToken.None));
             lifetime.StopApplication();
+        }
+    }
+
+    /// <summary>
+    /// <see cref="IHeartbeat"/> promises never to throw; this makes the promise hold even for a
+    /// broken implementation. A start ping that threw would skip the night's pass, and a finish
+    /// ping that threw would escape <c>finally</c> before <c>StopApplication</c>. Neither may cost
+    /// an alert or change the exit code, so a fault is logged (type and message only) and dropped.
+    /// </summary>
+    private async Task PingAsync(string kind, Func<Task> ping)
+    {
+        try
+        {
+            await ping();
+        }
+        catch (Exception ex)
+        {
+            log.LogWarning("Heartbeat {Kind} ping faulted: {Error}", kind, Redact.Describe(ex));
         }
     }
 }

@@ -12,7 +12,7 @@ namespace Worker.Tests;
 public sealed class AppConfigTests : IDisposable
 {
     private static readonly string[] Keys =
-        ["PRECIP_NTFY_BASE_URL", "PRECIP_NTFY_TOPIC", "PRECIP_USER_AGENT", AppConfig.ConnectionStringKey];
+        ["PRECIP_NTFY_BASE_URL", "PRECIP_NTFY_TOPIC", "PRECIP_USER_AGENT", AppConfig.ConnectionStringKey, AppConfig.HeartbeatUrlKey];
 
     private readonly Dictionary<string, string?> _saved = Keys.ToDictionary(k => k, Environment.GetEnvironmentVariable);
 
@@ -22,6 +22,7 @@ public sealed class AppConfigTests : IDisposable
         Environment.SetEnvironmentVariable("PRECIP_NTFY_TOPIC", "test-topic-not-secret");
         Environment.SetEnvironmentVariable("PRECIP_USER_AGENT", "precip-tests (test@example.invalid)");
         Environment.SetEnvironmentVariable(AppConfig.ConnectionStringKey, "Host=localhost;Database=precip_test");
+        Environment.SetEnvironmentVariable(AppConfig.HeartbeatUrlKey, null);
     }
 
     public void Dispose()
@@ -109,6 +110,57 @@ public sealed class AppConfigTests : IDisposable
         Assert.DoesNotContain("test-topic-not-secret", text);
         Assert.DoesNotContain("precip_test", text);
         Assert.Contains("https://ntfy.sh", text);
+    }
+
+    // ---- Heartbeat URL (Block 6) ----
+
+    private const string PingUrl = "https://hc-ping.example.invalid/0f1e2d3c-secret-uuid";
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    public void Heartbeat_url_is_optional(string? raw)
+    {
+        Environment.SetEnvironmentVariable(AppConfig.HeartbeatUrlKey, raw);
+        Assert.Null(AppConfig.FromEnvironment().HeartbeatUrl);
+    }
+
+    [Fact]
+    public void Heartbeat_url_is_read_when_https()
+    {
+        Environment.SetEnvironmentVariable(AppConfig.HeartbeatUrlKey, PingUrl);
+        Assert.Equal(PingUrl, AppConfig.FromEnvironment().HeartbeatUrl);
+    }
+
+    [Theory]
+    [InlineData("http://hc-ping.example.invalid/0f1e2d3c-secret-uuid")]
+    [InlineData("hc-ping.example.invalid/0f1e2d3c-secret-uuid")]
+    [InlineData("not a url 0f1e2d3c-secret-uuid")]
+    public void Heartbeat_url_that_is_not_absolute_https_is_rejected_without_echoing_it(string raw)
+    {
+        Environment.SetEnvironmentVariable(AppConfig.HeartbeatUrlKey, raw);
+
+        var ex = Assert.Throws<InvalidOperationException>(AppConfig.FromEnvironment);
+
+        Assert.Contains(AppConfig.HeartbeatUrlKey, ex.Message);
+        Assert.DoesNotContain("0f1e2d3c-secret-uuid", ex.Message);
+    }
+
+    [Fact]
+    public void ToString_redacts_the_heartbeat_url()
+    {
+        Environment.SetEnvironmentVariable(AppConfig.HeartbeatUrlKey, PingUrl);
+
+        var text = AppConfig.FromEnvironment().ToString();
+
+        Assert.DoesNotContain("0f1e2d3c-secret-uuid", text);
+        Assert.Contains("HeartbeatUrl = (redacted)", text);
+    }
+
+    [Fact]
+    public void ToString_says_when_there_is_no_heartbeat()
+    {
+        Assert.Contains("HeartbeatUrl = (none)", AppConfig.FromEnvironment().ToString());
     }
 }
 

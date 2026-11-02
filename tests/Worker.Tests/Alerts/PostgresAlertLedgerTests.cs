@@ -329,6 +329,94 @@ public sealed class PostgresAlertLedgerTests(PostgresFixture postgres) : IAsyncL
         }
     }
 
+    private static readonly TimeSpan ShortBookkeeping = TimeSpan.FromSeconds(1);
+
+    /// <summary>
+    /// Makes Postgres stall (pg_sleep) on the writes matching <paramref name="when"/>, a trigger
+    /// condition on NEW. Stands in for a database that hangs at the worst moment.
+    /// </summary>
+    private async Task StallWritesAsync(string when)
+    {
+        await using var conn = new NpgsqlConnection(_db.ConnectionString);
+        await conn.OpenAsync(Ct);
+        await using var cmd = new NpgsqlCommand(
+            $"""
+            CREATE FUNCTION stall() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN PERFORM pg_sleep(15); RETURN NEW; END $$;
+            CREATE TRIGGER stall BEFORE INSERT OR UPDATE ON alert_history
+            FOR EACH ROW WHEN ({when}) EXECUTE FUNCTION stall();
+            """, conn);
+        await cmd.ExecuteNonQueryAsync(Ct);
+    }
+
+    /// <summary>
+    /// D44. After ntfy accepted, the UPDATE to Sent ignores the caller's cancellation (so a stop
+    /// can't turn a sent alert into a duplicate) but has its own bound, so a stalled database
+    /// can't hold the run past Azure's 300 s. Running out leaves the row Pending: the next run
+    /// resends, D25's accepted duplicate. The exception says "database", not "publish".
+    /// </summary>
+    /// <summary>
+    /// Ends whatever the stalled statement left behind on the server (a sleeping backend, or a
+    /// pooled connection Npgsql gave up on), so these tests don't eat the shared server's
+    /// connection slots while the rest of the suite runs.
+    /// </summary>
+    private async Task ReleaseStalledBackendsAsync()
+    {
+        NpgsqlConnection.ClearAllPools();
+        await using var conn = new NpgsqlConnection(_db.ConnectionString);
+        await conn.OpenAsync(Ct);
+        await using var cmd = new NpgsqlCommand(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid()",
+            conn);
+        await cmd.ExecuteNonQueryAsync(Ct);
+    }
+
+    [Fact]
+    public async Task A_stalled_database_after_the_send_is_abandoned_at_the_bookkeeping_bound()
+    {
+        await StallWritesAsync("NEW.status = 'Sent'");
+        var publisher = new FakeAlertPublisher();
+        await using var ctx = _db.NewContext();
+        var ledger = new PostgresAlertLedger(ctx, publisher, _clock, ShortBookkeeping);
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        await Assert.ThrowsAsync<LedgerBookkeepingTimeoutException>(() => ledger.SendAsync(_locationId, Tonight));
+        sw.Stop();
+
+        Assert.True(sw.Elapsed < ShortBookkeeping + TimeSpan.FromSeconds(4), $"took {sw.Elapsed}");
+        Assert.Equal(1, publisher.Calls);
+        await ctx.DisposeAsync();
+        await ReleaseStalledBackendsAsync();
+        Assert.Null(await _db.RowAsync(_locationId, Tonight.NightDate)); // rolled back: next run resends
+    }
+
+    /// <summary>
+    /// The same bound on the failure path: a publish that failed is rethrown promptly even when
+    /// recording the failure stalls. Losing the trail never changes what the next attempt does.
+    /// </summary>
+    [Fact]
+    public async Task A_stalled_database_while_recording_a_failure_still_rethrows_promptly()
+    {
+        await StallWritesAsync("NEW.last_error IS NOT NULL");
+        var publisher = new FakeAlertPublisher { Fail = _ => new HttpRequestException("ntfy down") };
+        await using var ctx = _db.NewContext();
+        var ledger = new PostgresAlertLedger(ctx, publisher, _clock, ShortBookkeeping);
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        await Assert.ThrowsAsync<HttpRequestException>(() => ledger.SendAsync(_locationId, Tonight));
+        sw.Stop();
+
+        Assert.True(sw.Elapsed < ShortBookkeeping + TimeSpan.FromSeconds(4), $"took {sw.Elapsed}");
+        await ctx.DisposeAsync();
+        await ReleaseStalledBackendsAsync();
+        Assert.Null(await _db.RowAsync(_locationId, Tonight.NightDate));
+    }
+
+    [Fact]
+    public void The_default_bookkeeping_bound_fits_the_budget() =>
+        // D44's arithmetic assumes 3 s plus Npgsql's 2 s cancellation timeout.
+        Assert.Equal(TimeSpan.FromSeconds(3), PostgresAlertLedger.DefaultBookkeepingTimeout);
+
     [Theory]
     [InlineData("Response status code does not indicate success: 500 (Internal Server Error).",
         "Response status code does not indicate success: 500 (Internal Server Error).")]

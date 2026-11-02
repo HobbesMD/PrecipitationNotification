@@ -88,7 +88,7 @@ side projects die.
 | 7 | CI/CD | Actions: build → test → container → push → deploy. |
 | 8 | README as design doc | What I built, what I traded away, why. Diagrams. |
 
-**Current block: 5.** (Block 1 done 2026-10-29 — notification confirmed on phone. Block 2 done 2026-10-29 — PR #1. Block 3 done 2026-10-29 — PR #2. Block 4 done 2026-10-31 — PR #3, merged after two clean scheduled runs, including the DST fall-back night.)
+**Current block: 7.** (Block 1 done 2026-10-29 — notification confirmed on phone. Block 2 done 2026-10-29 — PR #1. Block 3 done 2026-10-29 — PR #2. Block 4 done 2026-10-31 — PR #3, merged after two clean scheduled runs, including the DST fall-back night. Block 5 done 2026-11-01 — PR #4. Block 6 done 2026-11-02 — heartbeat drill reached phone and email; first scheduled run green.)
 
 Block 1 leaves debt *on purpose* — hardcoded coordinates, naive time handling,
 topic in source, no tests, no retry. Block 2 fixes it. Don't fix it early; the
@@ -103,6 +103,12 @@ None committed. Env vars (the Azure job gets them as secrets):
 - `PRECIP_USER_AGENT` — contact info for NWS
 - `PRECIP_NTFY_BASE_URL` — optional, defaults to `https://ntfy.sh`
 - `PRECIP_API_KEY` — Api only, at least 32 chars
+- `PRECIP_HEARTBEAT_URL` — healthchecks.io ping URL; secret (anyone holding it can
+  report "healthy"). Optional locally, required by `deploy.sh`. Absolute https only.
+- `OTEL_EXPORTER_OTLP_ENDPOINT` — OTLP export is off unless set. Local: the Aspire
+  dashboard (`http://localhost:4317`); prod: Grafana Cloud's OTLP gateway
+- `OTEL_EXPORTER_OTLP_HEADERS` — secret (carries the Grafana Cloud token)
+- `OTEL_SERVICE_NAME` — defaults to `precip-worker`
 
 Per-location settings are DB rows (since Block 4), managed through the API:
 

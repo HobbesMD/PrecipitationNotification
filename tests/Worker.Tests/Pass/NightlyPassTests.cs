@@ -360,6 +360,22 @@ public sealed class NightlyPassTests(PostgresFixture postgres)
     }
 
     [Fact]
+    public async Task The_time_zone_is_logged_only_at_debug()
+    {
+        // Production ships Information and above off the box (Log Analytics, OTLP: D42), and the
+        // zone is a location hint. It may appear at Debug only.
+        await using var h = await NewHarness();
+        await h.AddLocationAsync("alpha", threshold: 0);
+
+        await h.RunAsync();
+
+        Assert.Contains(h.Logs.Lines, l => l.StartsWith("Debug ", StringComparison.Ordinal) && l.Contains("America/New_York"));
+        Assert.DoesNotContain(h.Logs.Lines, l =>
+            !l.StartsWith("Debug ", StringComparison.Ordinal) && !l.StartsWith("Trace ", StringComparison.Ordinal)
+            && l.Contains("America/New_York"));
+    }
+
+    [Fact]
     public async Task Unavailable_amounts_are_warned_about_and_the_alert_still_goes_out()
     {
         await using var h = await NewHarness();
