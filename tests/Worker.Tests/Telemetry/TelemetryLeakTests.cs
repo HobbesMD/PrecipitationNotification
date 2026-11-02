@@ -6,6 +6,7 @@ using Npgsql;
 using OpenTelemetry.Logs;
 using TestSupport;
 using WireMock.Server;
+using Worker.Telemetry;
 
 namespace Worker.Tests.Telemetry;
 
@@ -105,6 +106,76 @@ public sealed class TelemetryLeakTests(PostgresFixture postgres)
         LeakScanner.AssertNoLeaks(run);
     }
 
+    /// <summary>
+    /// Refused connections rather than status codes: HttpClient throws, and Polly logs each retry
+    /// with the exception object. NWS is unreachable so Open-Meteo answers, ntfy is unreachable,
+    /// and the heartbeat answers 500 to every ping. Proves exception-carrying logs were produced
+    /// (and reduced to type and message by D46's log redactor) before scanning them.
+    /// </summary>
+    [Fact]
+    public async Task Refused_connections_and_a_failing_heartbeat_leak_nothing()
+    {
+        var (admin, role) = await LeakTestHost.CreateDatabaseAsync(postgres);
+        await LeakTestHost.SeedLocationAsync(admin);
+        using var server = WireMockServer.Start();
+        LeakTestHost.ConfigureServer(server, new LeakStubs(HeartbeatStatus: 500));
+        var config = new Dictionary<string, string?>(FastResilience) { ["Nws:BaseUrl"] = LeakTestHost.Unreachable };
+
+        var run = await LeakTestHost.RunAsync(server, role, config, ntfyBaseUrl: LeakTestHost.Unreachable);
+
+        Assert.Equal(3, run.ExitCode);
+        Assert.Contains(run.Requests, r => r.Path == "/v1/forecast");
+        Assert.Equal(2, run.Requests.Count(r => r.Path == $"/ping/{LeakTestHost.HeartbeatUuid}/start")); // retried
+        Assert.Equal(2, run.Requests.Count(r => r.Path == $"/ping/{LeakTestHost.HeartbeatUuid}/3"));
+        Assert.Contains(run.Logs, l => (l.FormattedMessage ?? "").Contains("Heartbeat", StringComparison.Ordinal));
+        Assert.Contains(run.Logs, l => Attribute(l, TelemetryLogRedactor.ExceptionType) is not null);
+        Assert.All(run.Logs, l => Assert.Null(l.Exception));
+        LeakScanner.AssertNoLeaks(run);
+    }
+
+    [Fact]
+    public async Task Both_providers_failing_leaks_nothing()
+    {
+        var (admin, role) = await LeakTestHost.CreateDatabaseAsync(postgres);
+        await LeakTestHost.SeedLocationAsync(admin);
+        using var server = WireMockServer.Start();
+        LeakTestHost.ConfigureServer(server, new LeakStubs(NwsStatus: 500, OpenMeteoStatus: 500));
+
+        var run = await LeakTestHost.RunAsync(server, role, FastResilience);
+
+        Assert.Equal(2, run.ExitCode);
+        Assert.Contains(run.Requests, r => r.Path == "/v1/forecast");
+        Assert.Contains(run.Requests, r => r.Path == $"/ping/{LeakTestHost.HeartbeatUuid}/2");
+        Assert.Equal(2, run.Spans.Count(s => s.OperationName == "precip.fetch" && s.Status == ActivityStatusCode.Error));
+        LeakScanner.AssertNoLeaks(run);
+    }
+
+    /// <summary>
+    /// NWS never answers in time, so the hard deadline cancels the pass mid-fetch: the cancelled
+    /// HTTP span, the cancelled location span (D47) and the backstop's error log are all scanned.
+    /// </summary>
+    [Fact]
+    public async Task Hard_deadline_leaks_nothing()
+    {
+        var (admin, role) = await LeakTestHost.CreateDatabaseAsync(postgres);
+        await LeakTestHost.SeedLocationAsync(admin);
+        using var server = WireMockServer.Start();
+        LeakTestHost.ConfigureServer(server, new LeakStubs(NwsDelay: TimeSpan.FromSeconds(30)));
+        var config = new Dictionary<string, string?>(FastResilience)
+        {
+            ["Worker:PassDeadline"] = "00:00:01",
+            ["Worker:HardDeadline"] = "00:00:02",
+        };
+
+        var run = await LeakTestHost.RunAsync(server, role, config);
+
+        Assert.Equal(7, run.ExitCode);
+        Assert.Contains(run.Requests, r => r.Path == $"/ping/{LeakTestHost.HeartbeatUuid}/7");
+        var location = Assert.Single(run.Spans, s => s.OperationName == "precip.location");
+        Assert.Equal("cancelled", location.GetTagItem("precip.outcome"));
+        LeakScanner.AssertNoLeaks(run);
+    }
+
     [Fact]
     public async Task Database_down_leaks_nothing()
     {
@@ -126,6 +197,9 @@ public sealed class TelemetryLeakTests(PostgresFixture postgres)
 
         Assert.Equal(6, run.ExitCode);
         Assert.Contains(run.Requests, r => r.Path == $"/ping/{LeakTestHost.HeartbeatUuid}/6");
+        // The failed connection attempt was really exported, so the scan below covers it.
+        TestContext.Current.SendDiagnosticMessage("db-down evidence: " + string.Join(" | ", DbFailureEvidence(run)));
+        Assert.NotEmpty(DbFailureEvidence(run));
         LeakScanner.AssertNoLeaks(run);
     }
 
@@ -166,6 +240,19 @@ public sealed class TelemetryLeakTests(PostgresFixture postgres)
         Assert.Contains(findings, f => f.Contains("lat,lon pair") && f.Contains("log"));
         Assert.Throws<Xunit.Sdk.TrueException>(() => LeakScanner.AssertNoLeaks(run));
     }
+
+    private static object? Attribute(LogRecord l, string key) =>
+        (l.Attributes ?? []).FirstOrDefault(a => a.Key == key).Value;
+
+    /// <summary>Where the dead database's failure shows up in the export: Npgsql spans with an error, or exception-typed log records.</summary>
+    private static List<string> DbFailureEvidence(LeakRun run) =>
+    [
+        .. run.Spans.Where(s => s.Source.Name == "Npgsql" && s.Status == ActivityStatusCode.Error)
+            .Select(s => $"npgsql span {s.DisplayName}: {s.Events.Count()} event(s)"),
+        .. run.Logs.Where(l => Attribute(l, TelemetryLogRedactor.ExceptionType) is string t
+                && (t.Contains("Npgsql", StringComparison.Ordinal) || t.Contains("Socket", StringComparison.Ordinal)))
+            .Select(l => $"log {l.CategoryName}: {Attribute(l, TelemetryLogRedactor.ExceptionType)}"),
+    ];
 
     private static string Url(Activity a) => Convert.ToString(a.GetTagItem("url.full"), CultureInfo.InvariantCulture) ?? "";
 

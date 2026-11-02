@@ -69,6 +69,30 @@ public sealed class BoundedShutdownTests
         Assert.Equal("", error.ToString());
     }
 
+    private sealed class FailsToStart : IHostedService
+    {
+        public Task StartAsync(CancellationToken cancellationToken) =>
+            throw new ArgumentException("Headers provided in an invalid format.");
+
+        public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+    }
+
+    [Fact]
+    public async Task A_host_that_fails_to_start_returns_false_with_type_and_message_only()
+    {
+        // Program turns false into exit 1. Before, the exception escaped Program unhandled: a crash
+        // with a stack trace instead of a config-error exit code.
+        var host = BuildHost(s => s.AddHostedService<FailsToStart>());
+        var error = new StringWriter();
+
+        var started = await BoundedShutdown.RunAsync(host, Budget, error, TimeProvider.System);
+
+        Assert.False(started);
+        Assert.Equal(
+            "Startup error: the host failed to start: ArgumentException: Headers provided in an invalid format.",
+            error.ToString().TrimEnd());
+    }
+
     [Fact]
     public async Task A_collector_that_never_answers_cannot_hold_the_exit_past_the_budget()
     {

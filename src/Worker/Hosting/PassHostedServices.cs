@@ -3,6 +3,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Worker.Heartbeat;
 using Worker.Pass;
+using Worker.Telemetry;
 
 namespace Worker.Hosting;
 
@@ -61,7 +62,9 @@ internal static class PassBackstop
         {
             // A scope per pass: the DbContext must not outlive one run.
             await using var scope = scopes.CreateAsyncScope();
-            return await scope.ServiceProvider.GetRequiredService<INightlyPass>().RunAsync(linked.Token);
+            var code = await scope.ServiceProvider.GetRequiredService<INightlyPass>().RunAsync(linked.Token);
+            PassMetrics.RecordPass(code);
+            return code;
         }
         catch (OperationCanceledException) when (backstop.IsCancellationRequested && !stoppingToken.IsCancellationRequested)
         {
@@ -69,7 +72,15 @@ internal static class PassBackstop
                 "Pass hit the hard deadline of {HardDeadline}; in-flight work was cancelled. "
                 + "An interrupted send stays Pending and the next run resends it (D25).",
                 options.HardDeadline);
+            PassMetrics.RecordPass(ExitCodes.PassDeadline);
             return ExitCodes.PassDeadline;
+        }
+        catch
+        {
+            // A shutdown or a crash: --once exits 1 for both (OncePassService). Counted here, where
+            // every pass ends, so the deadline and shutdown nights are not missing from the metric.
+            PassMetrics.RecordPass(ExitCodes.Failure);
+            throw;
         }
     }
 }

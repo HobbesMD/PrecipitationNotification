@@ -96,9 +96,9 @@ public sealed class NightlyPassTelemetryTests(PostgresFixture postgres)
             Assert.Contains(child.ParentSpanId, locationIds);
 
         // ---- metrics ----
-        var passes = Assert.Single(capture.Measurements, m => m.Name == "precip.passes");
-        Assert.Equal(1, passes.Value);
-        Assert.Equal(expect.ExitCode, passes.Tags[Instrumentation.Attributes.ExitCode]);
+        // precip.passes is counted by PassBackstop, where every pass ends, cancelled ones included
+        // (PassBackstopMetricsTests); the pass itself never counts it, so it can't be counted twice.
+        Assert.DoesNotContain(capture.Measurements, m => m.Name == "precip.passes");
 
         Assert.Single(capture.Measurements, m => m.Name == "precip.pass.duration");
 
@@ -153,6 +153,39 @@ public sealed class NightlyPassTelemetryTests(PostgresFixture postgres)
         Assert.Equal(ActivityStatusCode.Error, pass.Status);
         Assert.Equal("cancelled", pass.StatusDescription);
         Assert.DoesNotContain(capture.Measurements, m => m.Name == "precip.passes");
+    }
+
+    /// <summary>
+    /// D47. The hard deadline (or a shutdown) cancels the pass while a location is mid-fetch. The
+    /// location span still ends with an outcome, error status and a count, so a deadline night
+    /// shows which location it interrupted instead of a span with no outcome at all.
+    /// </summary>
+    [Fact]
+    public async Task A_location_interrupted_by_cancellation_ends_cancelled_and_is_counted()
+    {
+        using var capture = new Capture();
+        FreeIdleConnections();
+        await using var h = await PassHarness.CreateAsync(postgres);
+        await h.AddLocationAsync("alpha", threshold: 0);
+        using var cts = new CancellationTokenSource();
+        h.Forecasts.Handler = _ =>
+        {
+            cts.Cancel(); // the backstop fires mid-fetch
+            throw new OperationCanceledException(cts.Token);
+        };
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => h.RunAsync(ct: cts.Token));
+
+        var pass = Assert.Single(capture.Spans, s => s.OperationName == Instrumentation.Spans.Pass);
+        var location = Assert.Single(capture.Spans, s => s.OperationName == Instrumentation.Spans.Location);
+        Assert.Equal(pass.SpanId, location.ParentSpanId);
+        Assert.Equal(Instrumentation.Outcomes.Cancelled, location.GetTagItem(Instrumentation.Attributes.Outcome));
+        Assert.Equal(ActivityStatusCode.Error, location.Status);
+        Assert.Equal("cancelled", location.StatusDescription);
+
+        var counted = Assert.Single(capture.Measurements, m => m.Name == "precip.locations");
+        Assert.Equal(Instrumentation.Outcomes.Cancelled, counted.Tags[Instrumentation.Attributes.Outcome]);
+        Assert.Equal("none", counted.Tags[Instrumentation.Attributes.Provider]);
     }
 
     /// <summary>

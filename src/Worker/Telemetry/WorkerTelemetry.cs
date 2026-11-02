@@ -1,6 +1,5 @@
 using System.Diagnostics.Metrics;
 using System.Globalization;
-using System.Reflection;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Npgsql;
@@ -38,12 +37,28 @@ internal static class WorkerTelemetry
     /// <paramref name="configuration"/> (null counts as unset): with no endpoint the providers
     /// still exist (so spans and the redactor run, and tests can add an exporter) but no exporter
     /// is registered, so there are no connection attempts, retries or console noise in tests, CI
-    /// or a bare local run. A malformed OTEL_* value fails startup like any other config error,
-    /// naming the key and never echoing the value.
+    /// or a bare local run.
+    ///
+    /// <para>
+    /// A malformed OTEL_* value turns export off for the run instead of failing it (D45): a
+    /// warning names the key, never the value, and the pass runs as normal. Telemetry must never
+    /// cost the night's alert, and a typo in the headers secret would otherwise throw inside the
+    /// SDK as the host starts, before the pass and before either heartbeat ping.
+    /// </para>
     /// </summary>
     public static IServiceCollection AddWorkerTelemetry(this IServiceCollection services, IConfiguration? configuration)
     {
-        var otlp = ReadOtlp(configuration);
+        OtlpSettings? otlp;
+        try
+        {
+            otlp = ReadOtlp(configuration);
+        }
+        catch (InvalidOperationException ex)
+        {
+            otlp = null;
+            services.AddHostedService(sp => new TelemetryConfigWarning(
+                sp.GetRequiredService<Microsoft.Extensions.Logging.ILoggerFactory>(), ex.Message));
+        }
         var serviceName = configuration?["OTEL_SERVICE_NAME"] is { Length: > 0 } name ? name : DefaultServiceName;
 
         services.AddOpenTelemetry()
@@ -73,13 +88,15 @@ internal static class WorkerTelemetry
                 if (otlp is not null)
                     metrics.AddOtlpExporter(o => otlp.Apply(o, "v1/metrics"));
             })
-            // Logs bypass the span processor entirely. They rely on the existing D22 log hygiene
-            // instead: HttpClient's URL-bearing logs are off (see AddWorkerServices), our own error
-            // logs go through Redact.Describe, and nothing logs an exception object. The same
-            // filters apply to this provider as to the console one, which stays.
+            // Logs bypass the span processor entirely. They have the D22 log hygiene (HttpClient's
+            // URL-bearing logs are off, see AddWorkerServices; our own error logs go through
+            // Redact.Describe and never pass an exception object), and, because framework code
+            // does pass exception objects, their own redactor: FIRST, for the same reason as the
+            // span one. The same filters apply to this provider as to the console one, which stays.
             .WithLogging(
                 logging =>
                 {
+                    logging.AddProcessor(new TelemetryLogRedactor());
                     if (otlp is not null)
                         logging.AddOtlpExporter(o => otlp.Apply(o, "v1/logs"));
                 },
@@ -97,7 +114,7 @@ internal static class WorkerTelemetry
     /// instrument with <c>db.client.connection.pool.name</c>, which is the data source name: by
     /// default the connection string (password removed, but still user, host and database).
     /// HttpClient's <c>http.client.open_connections</c> carries <c>network.peer.address</c>.
-    /// Our own meter may use any <c>precip.*</c> key except the location id and name.
+    /// Our own meter keeps only <see cref="PrecipMetricTags"/>.
     /// </summary>
     private static MetricStreamConfiguration? MetricTagAllowlist(Instrument instrument) =>
         instrument.Meter.Name switch
@@ -130,12 +147,18 @@ internal static class WorkerTelemetry
             _ => null,
         };
 
-    private static readonly string[] PrecipMetricTags = typeof(Instrumentation.Attributes)
-        .GetFields(BindingFlags.Public | BindingFlags.Static)
-        .Where(f => f.IsLiteral && f.FieldType == typeof(string))
-        .Select(f => (string)f.GetRawConstantValue()!)
-        .Where(k => k is not Instrumentation.Attributes.LocationId and not Instrumentation.Attributes.LocationName)
-        .ToArray();
+    /// <summary>
+    /// Listed, not derived from <see cref="Instrumentation.Attributes"/>: every key here is a new
+    /// time series per value, so each one is a decision. Exit code, outcome and provider have a
+    /// handful of values each. The night date (one series a night), the location id and name,
+    /// and the per-evaluation numbers are span attributes only (D43).
+    /// </summary>
+    internal static readonly string[] PrecipMetricTags =
+    [
+        Instrumentation.Attributes.ExitCode,
+        Instrumentation.Attributes.Outcome,
+        Instrumentation.Attributes.Provider,
+    ];
 
     /// <summary>
     /// The OTLP settings, read from the standard variable names in <paramref name="configuration"/>
@@ -168,8 +191,46 @@ internal static class WorkerTelemetry
         // The headers carry the collector's credentials (a Grafana Cloud token): passed through,
         // never logged or echoed in an error.
         var headers = configuration["OTEL_EXPORTER_OTLP_HEADERS"];
+        if (!string.IsNullOrWhiteSpace(headers) && !HeadersAreWellFormed(headers))
+            throw new InvalidOperationException(
+                "OTEL_EXPORTER_OTLP_HEADERS must be comma-separated key=value pairs (spaces in a value written as %20).");
         return new OtlpSettings(uri, protocol, timeout, string.IsNullOrWhiteSpace(headers) ? null : headers);
     }
+
+    /// <summary>
+    /// The shape the OTLP exporter accepts (OpenTelemetry 1.20: split on ',', each pair split at
+    /// the first '=', the value URL-decoded, then added as an HTTP header). Anything else throws
+    /// inside the SDK when the providers are built, so it is caught here, where it can be reported
+    /// without the value.
+    /// </summary>
+    internal static bool HeadersAreWellFormed(string headers)
+    {
+        foreach (var pair in headers.Split(','))
+        {
+            var eq = pair.IndexOf('=');
+            if (eq <= 0)
+                return false;
+            var key = pair[..eq].Trim();
+            if (key.Length == 0 || !key.All(IsTokenChar))
+                return false;
+            string value;
+            try
+            {
+                value = Uri.UnescapeDataString(pair[(eq + 1)..].Trim());
+            }
+            catch (UriFormatException)
+            {
+                return false;
+            }
+            if (value.Any(char.IsControl))
+                return false;
+        }
+        return true;
+    }
+
+    // RFC 9110 token characters: what an HTTP header name may contain.
+    private static bool IsTokenChar(char c) =>
+        char.IsAsciiLetterOrDigit(c) || "!#$%&'*+-.^_`|~".Contains(c);
 
     private sealed record OtlpSettings(Uri Endpoint, OtlpExportProtocol? Protocol, int TimeoutMilliseconds, string? Headers)
     {
@@ -188,4 +249,22 @@ internal static class WorkerTelemetry
                 o.Headers = Headers;
         }
     }
+}
+
+/// <summary>
+/// Reports, once at startup and through the normal logs, that a malformed OTEL_* setting turned
+/// export off. The message names the key and never the value.
+/// </summary>
+internal sealed class TelemetryConfigWarning(Microsoft.Extensions.Logging.ILoggerFactory loggers, string problem)
+    : Microsoft.Extensions.Hosting.IHostedService
+{
+    public Task StartAsync(CancellationToken cancellationToken)
+    {
+        Microsoft.Extensions.Logging.LoggerExtensions.LogWarning(
+            loggers.CreateLogger("Worker.Telemetry"),
+            "Telemetry: {Problem} OTLP export is off for this run; the pass is unaffected.", problem);
+        return Task.CompletedTask;
+    }
+
+    public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 }

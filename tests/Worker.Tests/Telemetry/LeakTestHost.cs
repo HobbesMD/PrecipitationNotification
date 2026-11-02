@@ -45,8 +45,10 @@ internal sealed class LeakRun
     public string Stderr { get; init; } = "";
 }
 
-/// <summary>What the fake servers answer.</summary>
-internal sealed record LeakStubs(int NwsStatus = 200, int OpenMeteoStatus = 200, int NtfyStatus = 200, int HeartbeatStatus = 200);
+/// <summary>What the fake servers answer. <c>NwsDelay</c> holds every NWS points response that long.</summary>
+internal sealed record LeakStubs(
+    int NwsStatus = 200, int OpenMeteoStatus = 200, int NtfyStatus = 200, int HeartbeatStatus = 200,
+    TimeSpan NwsDelay = default);
 
 /// <summary>
 /// Builds the real <c>--once</c> host the way <c>Program</c> does (AddWorkerServices + AddOncePass,
@@ -144,7 +146,7 @@ internal static class LeakTestHost
         if (stubs.NwsStatus == 200)
         {
             var points = FixtureFiles.Read($"{dir}/points.json").Replace("https://api.weather.gov", server.Url);
-            Serve(server, "/points/*", points, "application/geo+json");
+            Serve(server, "/points/*", points, "application/geo+json", stubs.NwsDelay);
             Serve(server, "/gridpoints/OKX/33,42/forecast/hourly", FixtureFiles.Read($"{dir}/forecast-hourly.json"), "application/geo+json");
             Serve(server, "/gridpoints/OKX/33,42", FixtureFiles.Read($"{dir}/gridpoint.json"), "application/geo+json");
         }
@@ -165,15 +167,23 @@ internal static class LeakTestHost
             .RespondWith(Response.Create().WithStatusCode(stubs.HeartbeatStatus));
     }
 
-    private static void Serve(WireMockServer server, string path, string body, string contentType) =>
-        server.Given(Request.Create().WithPath(path).UsingGet())
-            .RespondWith(Response.Create().WithStatusCode(200).WithHeader("Content-Type", contentType).WithBody(body));
+    private static void Serve(WireMockServer server, string path, string body, string contentType, TimeSpan delay = default)
+    {
+        var response = Response.Create().WithStatusCode(200).WithHeader("Content-Type", contentType).WithBody(body);
+        if (delay > TimeSpan.Zero)
+            response = response.WithDelay(delay);
+        server.Given(Request.Create().WithPath(path).UsingGet()).RespondWith(response);
+    }
+
+    /// <summary>A loopback port nothing listens on: connecting is refused, so HttpClient throws.</summary>
+    public const string Unreachable = "http://127.0.0.1:1";
 
     public static async Task<LeakRun> RunAsync(
-        WireMockServer server, string connectionString, IReadOnlyDictionary<string, string?>? extraConfig = null)
+        WireMockServer server, string connectionString, IReadOnlyDictionary<string, string?>? extraConfig = null,
+        string? ntfyBaseUrl = null)
     {
         var config = new AppConfig(
-            NtfyBaseUrl: server.Url!,
+            NtfyBaseUrl: ntfyBaseUrl ?? server.Url!,
             NtfyTopic: Topic,
             UserAgent: "leak-test (nobody@example.invalid)",
             ConnectionString: connectionString,

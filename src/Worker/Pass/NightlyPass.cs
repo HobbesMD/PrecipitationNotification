@@ -41,7 +41,7 @@ internal sealed class NightlyPass(
             span?.SetTag(Instrumentation.Attributes.ExitCode, code);
             if (code != ExitCodes.Ok)
                 span?.SetStatus(ActivityStatusCode.Error);
-            PassMetrics.RecordPass(code);
+            // precip.passes is counted by PassBackstop, which also sees the cancelled passes.
             return code;
         }
         catch (OperationCanceledException)
@@ -132,6 +132,13 @@ internal sealed class NightlyPass(
                     location.Id, location.Name, Describe(ex));
                 code = ExitCodes.Failure;
             }
+            catch (OperationCanceledException)
+            {
+                // Our own token: the hard deadline or a shutdown. The span still ends with an
+                // outcome, and the location is still counted, before the cancellation propagates.
+                run.Cancelled();
+                throw;
+            }
 
             run.Complete(code);
             if (code != ExitCodes.Ok && firstFailure == ExitCodes.Ok)
@@ -190,6 +197,13 @@ internal sealed class NightlyPass(
             if (code != ExitCodes.Ok)
                 span?.SetStatus(ActivityStatusCode.Error);
             PassMetrics.RecordLocation(outcome, _provider);
+        }
+
+        public void Cancelled()
+        {
+            span?.SetTag(Instrumentation.Attributes.Outcome, Instrumentation.Outcomes.Cancelled);
+            span?.SetStatus(ActivityStatusCode.Error, "cancelled");
+            PassMetrics.RecordLocation(Instrumentation.Outcomes.Cancelled, _provider);
         }
     }
 
@@ -542,6 +556,6 @@ internal sealed class NightlyPass(
     /// level in. A publish failure (HttpRequestException, timeout) never matches.
     /// </summary>
     private static bool IsDatabaseFailure(Exception ex) =>
-        ex is System.Data.Common.DbException or DbUpdateException
+        ex is System.Data.Common.DbException or DbUpdateException or LedgerBookkeepingTimeoutException
         || ex.InnerException is System.Data.Common.DbException;
 }

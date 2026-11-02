@@ -17,6 +17,7 @@ using Worker.Pass;
 //                 never touch alert_history, never ping the heartbeat.
 //
 // Telemetry: traces, metrics and logs go over OTLP only when OTEL_EXPORTER_OTLP_ENDPOINT is set.
+// A malformed OTEL_* value turns export off for the run with a warning; it never stops the pass.
 //
 // Exit codes: 0 ok, 1 no active locations / bad config / unexpected, 2 both forecast providers
 // failed (NWS and the Open-Meteo fallback), 3 ntfy publish, 4 incomplete forecast, 5 runtime
@@ -109,7 +110,8 @@ var host = builder.Build();
 var exit = host.Services.GetRequiredService<ExitCodeHolder>();
 // Not host.RunAsync(): that disposes the host, which flushes telemetry, with no time limit.
 // BoundedShutdown caps the flush so the run always exits inside Azure's 300 s replica timeout.
-await BoundedShutdown.RunAsync(host, BoundedShutdown.FlushBudget, Console.Error);
+if (!await BoundedShutdown.RunAsync(host, BoundedShutdown.FlushBudget, Console.Error))
+    return Environment.ExitCode = ExitCodes.Failure;
 
 // Only --once sets a code; the loop exits 0 on a normal shutdown.
 return Environment.ExitCode = exit.Code;

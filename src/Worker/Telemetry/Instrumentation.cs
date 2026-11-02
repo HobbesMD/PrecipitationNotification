@@ -97,5 +97,8 @@ internal static class Instrumentation
 
         /// <summary>Not started: the pass deadline had passed (D37).</summary>
         public const string SkippedDeadline = "skipped_deadline";
+
+        /// <summary>Interrupted: the hard deadline or a shutdown cancelled it mid-run.</summary>
+        public const string Cancelled = "cancelled";
     }
 }

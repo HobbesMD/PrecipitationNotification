@@ -26,13 +26,25 @@ internal static class BoundedShutdown
     /// Starts the host, waits for it to stop (the <c>--once</c> service stops it after the finish
     /// ping; the loop on Ctrl+C/SIGTERM), then disposes it within <paramref name="budget"/>.
     /// Unlike <c>HostingAbstractionsHostExtensions.RunAsync</c>, which disposes without a limit.
+    /// Returns false when the host failed to start: the failure is written to
+    /// <paramref name="error"/> as type and message only (D22), never thrown, so the caller exits
+    /// 1 rather than crashing with a stack trace. No pass ran, so no heartbeat ping was sent.
     /// </summary>
-    public static async Task RunAsync(IHost host, TimeSpan budget, TextWriter error, TimeProvider? clock = null)
+    public static async Task<bool> RunAsync(IHost host, TimeSpan budget, TextWriter error, TimeProvider? clock = null)
     {
         try
         {
-            await host.StartAsync();
+            try
+            {
+                await host.StartAsync();
+            }
+            catch (Exception ex)
+            {
+                error.WriteLine($"Startup error: the host failed to start: {Redact.Describe(ex)}");
+                return false;
+            }
             await host.WaitForShutdownAsync();
+            return true;
         }
         finally
         {

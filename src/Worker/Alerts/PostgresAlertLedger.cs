@@ -37,9 +37,26 @@ namespace Worker.Alerts;
 /// the context for the next call to trip over.
 /// </para>
 /// </summary>
-internal sealed class PostgresAlertLedger(PrecipDbContext db, IAlertPublisher publisher, TimeProvider clock)
+internal sealed class PostgresAlertLedger(
+    PrecipDbContext db, IAlertPublisher publisher, TimeProvider clock, TimeSpan? bookkeepingTimeout = null)
     : IAlertLedger
 {
+    /// <summary>
+    /// How long the writes that ignore the caller's cancellation may take: after ntfy accepted
+    /// (UPDATE to Sent + COMMIT), or after it failed (ROLLBACK + recording the failure). Those
+    /// writes can't take the hard deadline's token, because cancelling them would turn a sent
+    /// alert into a duplicate; but unbounded, a stalled database could hold them for Npgsql's
+    /// 30 s command timeout each and push the run past Azure's 300 s (D44). Npgsql may then
+    /// spend up to its own 2 s cancellation timeout giving up, so this costs at most about 5 s.
+    /// When it runs out the outcome is the same as a lost commit: the row stays Pending and the
+    /// next run resends, the at-least-once duplicate D25 already accepts.
+    /// </summary>
+    public static readonly TimeSpan DefaultBookkeepingTimeout = TimeSpan.FromSeconds(3);
+
+    private readonly TimeSpan _bookkeepingTimeout = bookkeepingTimeout ?? DefaultBookkeepingTimeout;
+
+    private CancellationTokenSource Bookkeeping() => new(_bookkeepingTimeout, clock);
+
     /// <summary>
     /// A plain read, and only an optimization: it lets the caller skip the NWS fetch
     /// for a night that already went out. It is <em>not</em> the enforcement. Between
@@ -102,14 +119,33 @@ internal sealed class PostgresAlertLedger(PrecipDbContext db, IAlertPublisher pu
         catch (Exception ex) when (!IsOurCancellation(ex, ct))
         {
             // Ends the lock. The failure is then recorded outside it, in its own transaction,
-            // because this one is about to be thrown away.
-            await RollBackQuietlyAsync(tx);
-            await RecordFailureQuietlyAsync(locationId, nightDate, ex);
+            // because this one is about to be thrown away. Both share one bounded budget.
+            using var failureBookkeeping = Bookkeeping();
+            await RollBackQuietlyAsync(tx, failureBookkeeping.Token);
+            await RecordFailureQuietlyAsync(locationId, nightDate, ex, failureBookkeeping.Token);
             throw;
         }
 
-        // The push has gone out. From here on, ignore cancellation: abandoning the bookkeeping now
-        // would only leave the row Pending and turn a stop request into a duplicate alert.
+        // The push has gone out. From here on, ignore the caller's cancellation: abandoning the
+        // bookkeeping now would only leave the row Pending and turn a stop request into a
+        // duplicate alert. It is bounded by its own short timeout instead (see Bookkeeping).
+        using var sentBookkeeping = Bookkeeping();
+        try
+        {
+            await MarkSentAsync(row.Id, assessment, msg, tx, sentBookkeeping.Token);
+        }
+        catch (OperationCanceledException ex) when (sentBookkeeping.IsCancellationRequested)
+        {
+            // Not the caller's cancellation, and not a failed publish: say which it is, so the
+            // pass reports a database problem (exit 6) rather than "ntfy down" (exit 3).
+            throw new LedgerBookkeepingTimeoutException(_bookkeepingTimeout, ex);
+        }
+        return SendOutcome.Sent;
+    }
+
+    private async Task MarkSentAsync(
+        long rowId, NightAssessment assessment, ComposedMessage msg, IDbContextTransaction tx, CancellationToken bounded)
+    {
         var sentAt = clock.GetUtcNow();
         await db.Database.ExecuteSqlAsync(
             $"""
@@ -122,14 +158,14 @@ internal sealed class PostgresAlertLedger(PrecipDbContext db, IAlertPublisher pu
                 kind = {assessment.Kind.ToString()},
                 title = {msg.Title},
                 provider = {assessment.Provider}
-            WHERE id = {row.Id}
+            WHERE id = {rowId}
             """,
-            CancellationToken.None);
+            bounded);
 
-        // If this commit fails, the push went out but the row stays Pending and the next run
-        // re-sends: the same at-least-once case as a lost ntfy response, and accepted with it.
-        await tx.CommitAsync(CancellationToken.None);
-        return SendOutcome.Sent;
+        // If this commit fails or runs out of time, the push went out but the row stays Pending
+        // and the next run re-sends: the same at-least-once case as a lost ntfy response, and
+        // accepted with it.
+        await tx.CommitAsync(bounded);
     }
 
     /// <summary>
@@ -141,11 +177,11 @@ internal sealed class PostgresAlertLedger(PrecipDbContext db, IAlertPublisher pu
     private static bool IsOurCancellation(Exception ex, CancellationToken ct) =>
         ex is OperationCanceledException && ct.IsCancellationRequested;
 
-    private static async Task RollBackQuietlyAsync(IDbContextTransaction tx)
+    private static async Task RollBackQuietlyAsync(IDbContextTransaction tx, CancellationToken bounded)
     {
         try
         {
-            await tx.RollbackAsync(CancellationToken.None);
+            await tx.RollbackAsync(bounded);
         }
         catch
         {
@@ -163,14 +199,14 @@ internal sealed class PostgresAlertLedger(PrecipDbContext db, IAlertPublisher pu
     /// The DO UPDATE is guarded on Pending: between the rollback and this statement another sender
     /// may have taken the lock and sent, and a Sent row must never be marked back to Pending.
     /// </summary>
-    private async Task RecordFailureQuietlyAsync(int locationId, DateOnly nightDate, Exception ex)
+    private async Task RecordFailureQuietlyAsync(int locationId, DateOnly nightDate, Exception ex, CancellationToken bounded)
     {
         var now = clock.GetUtcNow();
         var error = DescribeFailure(ex);
 
         try
         {
-            await using var tx = await db.Database.BeginTransactionAsync(CancellationToken.None);
+            await using var tx = await db.Database.BeginTransactionAsync(bounded);
             await db.Database.ExecuteSqlAsync(
                 $"""
                 INSERT INTO alert_history (location_id, night_date, status, attempts, created_at, last_attempt_at, last_error)
@@ -181,8 +217,8 @@ internal sealed class PostgresAlertLedger(PrecipDbContext db, IAlertPublisher pu
                     last_error = EXCLUDED.last_error
                 WHERE alert_history.status = 'Pending'
                 """,
-                CancellationToken.None);
-            await tx.CommitAsync(CancellationToken.None);
+                bounded);
+            await tx.CommitAsync(bounded);
         }
         catch
         {
@@ -201,3 +237,11 @@ internal sealed class PostgresAlertLedger(PrecipDbContext db, IAlertPublisher pu
 
     internal static string ScrubUrls(string text) => Redact.Urls(text);
 }
+
+/// <summary>
+/// The writes after a successful publish ran out of their bounded time
+/// (<see cref="PostgresAlertLedger.DefaultBookkeepingTimeout"/>). The push went out; the row stays
+/// Pending, so the next run resends (D25's at-least-once case). A database problem, not a publish one.
+/// </summary>
+internal sealed class LedgerBookkeepingTimeoutException(TimeSpan timeout, Exception inner)
+    : TimeoutException($"Alert ledger bookkeeping did not finish within {timeout.TotalSeconds:0} s.", inner);
