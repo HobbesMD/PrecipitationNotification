@@ -1554,6 +1554,21 @@ It found one high-severity defect and two medium ones.
 - `OncePassHeartbeatTests`: `Start_comes_before_the_pass_and_finish_after_it_with_the_passs_code`, `A_throwing_pass_finishes_with_1`, `The_hard_deadline_finishes_with_7`.
 - `AppConfigTests`: `Heartbeat_url_that_is_not_absolute_https_is_rejected_without_echoing_it`, `ToString_redacts_the_heartbeat_url`.
 
+**In production (2026-11-02):**
+- `deploy.sh` deployed image `13aaf54838b9` with the secrets `heartbeat-url` and `otlp-headers`. `job show` lists them by name only.
+- **A manual run** (`job-precip-nightly-muuvz0j`) on a dry night exited 0, and the check turned green with `start` then success.
+- **The drill:** for one run, `Worker__PassDeadline=00:00:00.001` was set on the job (`job-precip-nightly-jop5jpo`).
+  - The location was "not evaluated" and the run exited 7. Azure's retry also exited 7.
+  - The "down" alert reached the phone (the second ntfy topic) and the email.
+  - The variable was then removed, and a normal run (`job-precip-nightly-s39y27i`) brought the check back up.
+- **The drill as first written didn't work.** It was meant to override `Nws__BaseUrl` and `OpenMeteo__BaseUrl` for one execution, but:
+  - `az containerapp job start --env-vars` **replaces** the job's environment rather than merging into it. That run died with `Config error: Missing required environment variable PRECIP_NTFY_TOPIC` before the host started and sent no ping: the grace-period-only case above, seen for real.
+  - Restating the variables fails, because an execution override can't resolve the job's secrets.
+  - Even applied to the job itself, `Nws__BaseUrl` changes nothing for an established location: the hourly URL is cached on the row (D27).
+
+  The runbook (`deploy/azure/README.md`) now documents the deadline drill.
+- **The first scheduled run** (`job-precip-nightly-29894340`, 23:00 UTC) succeeded in 39 s with the heartbeat active, and the check stayed green with no manual help.
+
 #### D40. A heartbeat or telemetry failure never changes the outcome, and the 300 s budget holds by construction
 
 **Decision:**
@@ -1600,6 +1615,8 @@ It found one high-severity defect and two medium ones.
 - `Malformed_otlp_setting_turns_export_off_and_warns_naming_only_the_key` (D45)
 
 **Locally (2026-11-01):** `--once --dry-run` against the Aspire dashboard produced one trace: `precip.pass` → Npgsql spans for the location query → `precip.location` (outcome `dry`, provider `NWS`) → `precip.fetch` → two HTTP spans, `https://api.weather.gov/gridpoints/{redacted}/{redacted}/forecast/hourly` and `.../gridpoints/{redacted}/{redacted}` → `precip.evaluate`. No coordinate appeared in the exported spans or logs.
+
+**In production (2026-11-02):** the manual run's trace arrived in Grafana Cloud (Tempo) under service `precip-worker`, with `{redacted}` URLs. Before the deploy, a local `--once --dry-run` against the same gateway showed no exporter errors in the SDK's self-diagnostics log, and that log never contained the token.
 
 #### D42. Telemetry is redacted by allowlist before any exporter sees it, and no trace context leaves the process
 

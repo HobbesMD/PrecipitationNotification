@@ -154,31 +154,44 @@ green.
 
 ### Drill: prove the alarm reaches your phone
 
-Run once against dead providers so the run exits 2, and confirm the
-healthchecks.io alert reaches the phone. `az containerapp job start` takes
-`--image`, `--args` and `--env-vars` (per the Azure CLI reference), so the override
-applies to that one execution and the deployed job is never edited:
+Make one run exit non-zero and confirm the healthchecks.io alert reaches the
+phone and the inbox. The reliable way is a **1 ms pass deadline**. The location
+is skipped as "not evaluated", and the run exits **7** and pings `/7`. It
+touches no data and calls no provider. Set it on the job, start one run, and
+remove it straight away:
 
 ```bash
-az containerapp job start -n "$AZ_JOB" -g "$AZ_RG" \
-  --image "$IMAGE" --args=--once \
-  --env-vars Nws__BaseUrl=https://127.0.0.1:9/ OpenMeteo__BaseUrl=https://127.0.0.1:9/
+az containerapp job update -n "$AZ_JOB" -g "$AZ_RG" \
+  --set-env-vars Worker__PassDeadline=00:00:00.001
+az containerapp job start -n "$AZ_JOB" -g "$AZ_RG"
+# wait for the execution to finish (az containerapp job execution list ...), then:
+az containerapp job update -n "$AZ_JOB" -g "$AZ_RG" \
+  --remove-env-vars Worker__PassDeadline
+az containerapp job show -n "$AZ_JOB" -g "$AZ_RG" \
+  --query "properties.template.containers[0].env[].name" -o tsv   # back to the deployed set
 ```
 
-Check the execution's logs. An override may replace the container's environment
-rather than merge into it. If the run fails for missing configuration (connection
-string, heartbeat URL) instead of reaching the dead host, restate the full set of
-variables, using `secretref:` for the secrets as `deploy.sh` does. If your CLI
-version rejects `--env-vars` on `start`, fall back to a temporary
-`az containerapp job update --set-env-vars Nws__BaseUrl=... OpenMeteo__BaseUrl=...`,
-start the job, then revert with
-`--remove-env-vars Nws__BaseUrl OpenMeteo__BaseUrl` (re-running `deploy.sh` also
-works: its `--replace-env-vars` drops them).
+Re-running `deploy.sh` also reverts it: its `--replace-env-vars` drops the
+variable. Do the drill well before 23:00 UTC, so the scheduled run never sees
+the override.
 
-Expected: exit 2 and an immediate "down" alert on the phone and by email. Then
-start a normal run (`az containerapp job start -n "$AZ_JOB" -g "$AZ_RG"`) and
-watch the check return to "up". If the alert only arrives after the grace period,
-the `/<exit code>` ping isn't reaching healthchecks.io; read the logs.
+Expected:
+- **Execution status `Failed`.** Azure's one retry (D20) runs too and also exits 7.
+- **An immediate "down" alert** on the phone and by email.
+
+Then start a normal run (`az containerapp job start -n "$AZ_JOB" -g "$AZ_RG"`)
+and watch the check return to "up".
+
+**What doesn't work** (learned the hard way, 2026-11-02):
+- **Per-execution overrides** (`az containerapp job start --env-vars ...`).
+  They *replace* the container's whole environment instead of merging into it.
+  The run then dies with `Config error: Missing required environment variable`
+  before the host starts, so no ping is sent: only the grace period catches it.
+  Restating the variables doesn't help either, because an execution override
+  can't resolve the job's secrets (`ContainerAppSecretRefNotFound`).
+- **Pointing `Nws__BaseUrl` at a dead host.** For a location that has run before,
+  the hourly forecast URL is cached on its row (D27), so the base URL is used only
+  for a fresh `/points` lookup and NWS still answers.
 
 ## Migrate
 
