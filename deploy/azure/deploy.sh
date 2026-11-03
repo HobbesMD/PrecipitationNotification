@@ -13,6 +13,9 @@
 # shell history only) and are never echoed. No `set -x`, ever.
 set -euo pipefail
 
+# shellcheck source=deploy/azure/lib.sh
+source "$(dirname "$0")/lib.sh"
+
 AZ_RG="${AZ_RG:-rg-precip}"
 AZ_LOCATION="${AZ_LOCATION:-eastus}"
 AZ_ENV="${AZ_ENV:-cae-precip}"
@@ -29,18 +32,10 @@ AZ_JOB="${AZ_JOB:-job-precip-nightly}"
 : "${OTEL_EXPORTER_OTLP_ENDPOINT:?set OTEL_EXPORTER_OTLP_ENDPOINT (the Grafana Cloud OTLP gateway URL)}"
 : "${OTEL_EXPORTER_OTLP_HEADERS:?set OTEL_EXPORTER_OTLP_HEADERS (Authorization=Basic%20<base64>; see deploy/azure/README.md)}"
 
-# The job must pin a commit so every run is traceable to one: a git sha tag
-# (7-40 hex) or a digest. Branch-like tags (:main, :latest) are mutable on GHCR.
-# Take the last path segment, so a registry port (host:5000/img) isn't read as a tag.
-last_segment="${IMAGE##*/}"
-if [[ "$IMAGE" =~ @sha256:[0-9a-f]{64}$ ]]; then
-  :  # digest reference: immutable by construction
-elif [[ "$last_segment" == *:* && "${last_segment##*:}" =~ ^[0-9a-f]{7,40}$ ]]; then
-  :  # git sha tag
-else
-  echo "IMAGE must end in a git sha tag (:<7-40 hex>) or @sha256:<digest>, so a run maps to a commit." >&2
-  exit 1
-fi
+# The job must pin a commit: a git sha tag or a digest, never a mutable tag.
+# The rules live in lib.sh so deploy-image.sh (CI's image-only release) applies
+# exactly the same ones.
+validate_image "$IMAGE"
 
 # `show` exits non-zero for "doesn't exist" AND for real errors (unregistered
 # provider, expired login, throttling). Only the first may fall through to
@@ -80,14 +75,9 @@ fi
 CRON="0 23 * * *"
 
 # service.version for telemetry: the image's git sha tag, or the digest's hex for a
-# digest reference. Both forms are validated above, so the value is [0-9a-f] only.
-# That matters: OTEL_RESOURCE_ATTRIBUTES is a comma/equals-delimited list, and a
-# value containing either would corrupt it.
-if [[ "$IMAGE" =~ @sha256:([0-9a-f]{64})$ ]]; then
-  service_version="${BASH_REMATCH[1]}"
-else
-  service_version="${last_segment##*:}"
-fi
+# digest reference ([0-9a-f] only, so it can't corrupt OTEL_RESOURCE_ATTRIBUTES;
+# see lib.sh).
+service_version=$(image_service_version "$IMAGE")
 
 # Secret names are limited to 20 chars. The ntfy topic, the DB connection string
 # (it carries the password), the heartbeat URL (anyone holding it can report

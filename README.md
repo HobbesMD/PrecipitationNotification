@@ -62,10 +62,10 @@ later block. Repaid rows stay, struck through, so the history is visible.
 | ~~No tracing or metrics.~~ | ✅ Block 6 ([D41](#d41-telemetry-speaks-otlp-only-the-backend-is-configuration), [D43](#d43-whats-measured-and-why-metric-tags-never-name-a-location)) |
 | ~~Silence is ambiguous: "no precip" and "the job is dead" look identical. No heartbeat.~~ | ✅ Block 6 ([D39](#d39-the-heartbeat-is-an-outside-watcher-healthchecksio-pinged-at-start-and-with-the-exit-code)) |
 | ~~Console app only — no container, no schedule, runs from a dev machine.~~ | ✅ Block 3 ([D18](#d18-runtime-image-chiseled--extra-proved-by---self-check), [D19](#d19-the-nightly-run-is-2300-utc)) |
-| Image build, push and deploy are manual (`docker push`, `deploy/azure/deploy.sh`). CI only tests and builds. *(New in Block 3.)* | Block 7 |
+| ~~Image build, push and deploy are manual (`docker push`, `deploy/azure/deploy.sh`). CI only tests and builds.~~ *(New in Block 3.)* `deploy.sh` stays manual for configuration changes on purpose. | ✅ Block 7 ([D49](#d49-ci-deploys-the-image-and-nothing-else-the-apps-secrets-never-enter-github), [D50](#d50-a-merge-to-main-deploys-automatically-the-nightly-run-is-the-smoke-test)) |
 | A lost ntfy response plus the job's one retry can send the same alert twice ([D20](#d20-one-retry-and-the-duplicate-it-can-cause)). *(New in Block 3.)* Narrowed by D25 to that one ambiguous case, which is now kept on purpose: a duplicate is better than a missed alert. | Accepted ([D25](#d25-one-alert-per-location-per-night-a-locked-row-at-least-once)) |
-| Actions are pinned to major tags, not commit SHAs. Low risk while CI holds no secrets ([D24](#d24-review-deploysh-fails-closed)). *(New in Block 3.)* | Block 7 |
-| The admin API runs only on the dev box; it isn't deployed ([D30](#d30-the-admin-api-is-local-only-behind-an-api-key)). *(New in Block 4.)* | Block 7 |
+| ~~Actions are pinned to major tags, not commit SHAs. Low risk while CI holds no secrets ([D24](#d24-review-deploysh-fails-closed)).~~ *(New in Block 3.)* | ✅ Block 7 ([D52](#d52-supply-chain-pinned-actions-the-image-pushed-only-from-main-and-no-tag-is-ever-overwritten)) |
+| The admin API runs only on the dev box; it isn't deployed ([D30](#d30-the-admin-api-is-local-only-behind-an-api-key)). *(New in Block 4.)* Revisited in Block 7: kept local on purpose. | Accepted ([D30](#d30-the-admin-api-is-local-only-behind-an-api-key)) |
 | One ntfy topic for every location. Per-location topics would mean storing a publish-capable secret in the database. *(New in Block 4.)* | Unscheduled |
 | The WireMock-based resilience tests (`NtfyResilienceTests`, `NwsBreakerIsolationTests`) occasionally time out on a cold first build; reproduced on `main` before Block 6 touched anything. *(New in Block 6.)* | Unscheduled |
 | The Open-Meteo capture is a dry week, so wet-night mapping is proven only with hand-built payloads ([D35](#d35-open-meteo-maps-onto-the-same-types-and-its-hours-end-at-their-timestamp)). *(New in Block 5.)* | Real wet capture, when one comes |
@@ -1205,6 +1205,8 @@ Deploying it publicly is debt for Block 7.
 - `Alerts_default_to_50_and_cap_at_500`;
 - startup refused for a missing, empty or 31-character key.
 
+**Revisited in Block 7 (2026-11-02): it stays local, on purpose.** The ledger had pencilled in "deploy the API" for Block 7. I decided against it. The API manages a handful of rows a year: adding a location, changing a threshold. Deploying it would mean a public endpoint that guards a write-capable key and the database credentials, plus ingress, auth and running cost, for no benefit to the nightly alert. The dev box with the Neon connection string is enough. What would change this: a second person managing locations, or a UI.
+
 #### D31. The Worker runs on the generic host: `--once` in Azure, a loop locally
 
 **Decision:** `Program.cs` builds a `Host.CreateApplicationBuilder` host, and
@@ -1801,3 +1803,119 @@ The console logger is unchanged. `NwsClient`'s gridpoint reasons now go through 
 **Low, also fixed:**
 - **Explicit metric tags (D43).** The allowlist was derived as "every `precip.*` key except the location", which would have admitted the night date. It's now a fixed list of three keys (`Our_metrics_keep_only_the_listed_tags`).
 - **The leak test's failure paths (D42).** It now covers refused connections with the heartbeat failing, both providers failing, and the hard deadline. The database-down scenario now proves the failure was exported before it scans.
+
+### Block 7: CI/CD
+
+Until Block 7, a release was three commands on my laptop: `docker build`, `docker push`, `deploy.sh`. Now a merge to main tests, builds, pushes and deploys with no laptop involved. The pipeline is `.github/workflows/ci.yml`, with these jobs:
+- `test`
+- `image`
+- `guard-test`
+- `deploy`
+
+#### D48. CI signs in to Azure with OIDC: no stored credential, one environment, one resource
+
+**Decision:** the `deploy` job gets a short-lived Azure token through **OpenID Connect federation**.
+- An Entra app registration (`gh-precip-deploy`) has **no client secret and no certificate**. Its one federated credential trusts tokens from GitHub's issuer whose subject is exactly `repo:HobbesMD/PrecipitationNotification:environment:production`.
+- The GitHub environment `production` accepts deployments from `main` only. A pull request, a fork or another branch can't produce that subject, so it gets no token.
+- The identity is `Contributor` on **the job resource only**, not the resource group or the subscription. Abused, it can repoint this job and nothing else.
+- `id-token: write` is granted only to the `deploy` job.
+- The three ids GitHub needs (client, tenant, subscription) are environment **variables**, not secrets. They identify; they don't authenticate.
+- `deploy/azure/setup-oidc.sh` creates all of this idempotently. It refuses to overwrite a federated credential that trusts a different subject, because that would silently change who can deploy.
+
+**Rejected:**
+- **A service-principal secret** (`AZURE_CREDENTIALS`). It's simpler to set up, but it's a long-lived credential in a public repo's settings. It has to be rotated, and it can leak through a workflow mistake (an echo, a debug step, a compromised action).
+
+**What would break it:**
+- Widening the federated subject (for example to `ref:refs/heads/*`), or removing the environment's branch rule. Either lets non-main code deploy.
+- Granting the role at resource-group scope "to make it work".
+- If `job update` also needs `Microsoft.App/managedEnvironments/join/action`, `setup-oidc.sh` with `JOIN_ENV=1` adds a custom role with only that action, on the environment only.
+
+**Proof:** in production (below), not unit tests.
+
+#### D49. CI deploys the image and nothing else; the app's secrets never enter GitHub
+
+**Decision:** the pipeline runs `deploy/azure/deploy-image.sh`, which changes two things:
+- the job's **image**;
+- the `service.version` entry inside `OTEL_RESOURCE_ATTRIBUTES`, so every trace names the commit that produced it (D41).
+
+Secrets, cron, sizing, registry and the other environment variables stay exactly as `deploy.sh` last set them. `deploy.sh` stays the manual tool for creating the job or changing its configuration, and the next CI deploy just swaps the image underneath.
+- **`--set-env-vars` merges; `--replace-env-vars` would drop the secretref variables.** One wrong flag would break the next night, so the script comments it.
+- **It never creates the job.** If the job is missing, it stops and points at `deploy.sh`.
+- **It reads the job back after the update.** The image must equal the target and `service.version` must be the new sha (compared as a whole entry), or the deploy fails. A deploy that says "done" while the old image still runs is the failure this block exists to remove.
+- **The image rules live in `deploy/azure/lib.sh`**, shared with `deploy.sh`, so the two scripts can't drift: a sha tag of 7–40 hex, or a digest.
+
+**Rejected:**
+- **Running the full `deploy.sh` in CI.** The configuration would be reproducible from CI, but GitHub would then hold every production secret (the database string, the ntfy topic, the heartbeat URL, the Grafana token), and the identity would need rights to set secrets. A config change is rare and deliberate, so it can stay manual.
+
+**What would break it:**
+- A configuration change made only in `deploy.sh` and never run. CI won't apply it.
+- A future step in the workflow that needs an app secret. That would reopen this decision, not be patched in quietly.
+
+**Tests:** run against a simulated `az` during the build, covering the happy path, a guard block, a missing `OTEL_RESOURCE_ATTRIBUTES`, a read-back mismatch, a failing `show`, and a digest image; plus production (below).
+
+#### D50. A merge to main deploys automatically; the nightly run is the smoke test
+
+**Decision:**
+- On a push to main, `deploy` runs once `test` (all three time zones), `image` (build, `--self-check`, push) and `guard-test` have succeeded. There is no approval click.
+- Deploys are serialized (`concurrency: production`) and never cancelled mid-flight. Two quick merges deploy in order.
+- **The pipeline never starts an execution.** Block 6 showed that an execution override replaces the job's whole environment and can't resolve its secrets. A CI smoke run would therefore be a real run that sends real alerts. Instead, the 23:00 UTC run is the smoke test, and the heartbeat (D39) reports it. A bad deploy reaches me by 00:00 UTC at the latest.
+- **Rollback** is `workflow_dispatch` with a 12-character `sha`. It redeploys an image that already exists (checked before Azure is touched) and doesn't rebuild or retest. `deploy-image.sh` also runs locally, for a rollback without GitHub.
+
+**Rejected:**
+- **A required-reviewer gate on `production`.** Safer for a schema change, but that case has its own guard (D51). For everything else, the click is a step nobody enforces, and a forgotten approval means the night runs on old code with no alarm.
+- **Deploying only by `workflow_dispatch`.** Fully deliberate, but it isn't continuous deployment, and "merged" would stop meaning "live".
+
+**What would break it:** a merge late in the evening deploys minutes before 23:00 UTC. A run that's already executing keeps its old image, and the next run takes the new one. The worst case is a broken image merged at 22:59. The heartbeat catches that at once, and rollback is one dispatch.
+
+#### D51. The migration guard: a deploy stops if the schema changed, until I've migrated
+
+**Problem:** D28 keeps migrations manual. A run against an out-of-date schema exits 6, which protects the data but still costs the night's alert. With automatic deploys (D50), merging a migration would make that outcome the default.
+
+**Decision:** before touching the job, `deploy-image.sh` runs `deploy/azure/migration-guard.sh <deployed image> <target sha> <migrations_applied>`.
+- It maps the deployed image's tag to a commit, then lists `git diff --name-only <deployed> <target> -- src/Persistence/Migrations/`.
+- **Nothing changed: exit 0. Something changed: exit 3.** On exit 3 it prints the files and the next steps:
+  1. run `Worker --migrate`;
+  2. re-run the deploy by dispatch with `migrations_applied=true`.
+- **It works in both directions.** `git diff A B` lists the same paths as `git diff B A`, so a **rollback** across a migration stops too. Old code against a newer schema needs a human to confirm it's compatible.
+- **It fails closed (exit 1)** whenever it can't decide:
+  - a digest-pinned deployed image (a digest names bytes, not a commit), even next to a tag;
+  - a mutable or missing tag;
+  - a commit missing from history (a shallow clone or rewritten history);
+  - an ambiguous short sha;
+  - a non-hex target;
+  - a git error.
+
+  The deploy job checks out full history so the deployed commit is visible.
+- `migrations_applied=true` is the only override, and only a dispatch can set it. A push always passes `false`.
+
+**Rejected:**
+- **Running `--migrate` in CI.** Fully automatic, but GitHub would need the Neon connection string with DDL rights. That undoes D49 for the most dangerous credential, and runs schema changes unattended, which D28 rejected for the same reason.
+- **No guard.** It's simpler, and D28's exit 6 still catches the mistake, but only after it has cost a night.
+
+**What would break it:**
+- A schema change that doesn't live in `src/Persistence/Migrations/` (a moved folder, or raw SQL somewhere else).
+- Ticking `migrations_applied` without having migrated. D28's exit 6 is still behind it.
+
+**Tests:** `deploy/azure/test-migration-guard.sh`, which CI runs as `guard-test`. It builds a throwaway repo with four commits: A (first migration), B (code only), C (second migration), D (docs only). It then checks 22 cases:
+- B→B is already deployed (0); A→B and C→D pass (0);
+- B→C and B→D block (3) and name `0002.cs`; the rollback D→B blocks (3);
+- the override passes (0);
+- an unknown sha, a digest ref, a tag-and-digest ref, `:latest`, an untagged ref, a non-hex target, a bad flag, a missing argument and running outside a repo all fail closed (1);
+- 12-character and full shas behave the same.
+
+With the guard mutated to always exit 0, all 22 cases fail.
+
+#### D52. Supply chain: pinned actions, the image pushed only from main, and no tag is ever overwritten
+
+**Decision:**
+- **Every `uses:` is pinned to a full commit sha**, with the version in a comment. A tag can be moved by whoever controls the action's repo, and the `deploy` job holds an Azure token. Dependabot (`.github/dependabot.yml`, weekly) proposes pin updates as reviewable PRs.
+- **Permissions are least privilege.** The top level is `contents: read`. `packages: write` is on `image` only, `id-token: write` on `deploy` only.
+- **The image is pushed with `GITHUB_TOKEN`**, only on a push to main. A PR build still builds and runs `--self-check`, but pushes nothing. No personal access token exists.
+- **Tags are never overwritten.** Before pushing `:<sha12>`, CI checks whether the tag exists and refuses if it does. A deployed sha must always mean the same bytes, or a rollback wouldn't restore what actually ran.
+- **No expression is interpolated into a script.** Every `${{ }}` reaches `run:` through `env:`, so the user-typed `sha` input is data, never shell text. It's also validated against `^[0-9a-f]{12}$`.
+
+**Rejected:**
+- **Version tags (`@v4`).** Convenient, and auto-updated, but mutable. It's the hole a compromised action uses.
+- **Deploying by digest.** It's stronger than "tags are never overwritten", but the migration guard needs a commit (D51), and the trace's `service.version` should read as one too.
+
+**What would break it:** a new step added with a tag instead of a sha, or a `${{ inputs.* }}` written straight into `run:`. The independent review checks both.

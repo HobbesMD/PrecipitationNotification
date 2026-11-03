@@ -5,6 +5,18 @@ on:
     branches: [main]
   push:
     branches: [main]
+  # Rollback path: redeploy an image that already exists in ghcr, without
+  # rebuilding. Only the deploy job runs on this trigger.
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Existing 12-char image tag to deploy (rollback)
+        type: string
+        required: true
+      migrations_applied:
+        description: Set true only if the schema this image needs is already applied
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -17,6 +29,8 @@ concurrency:
 jobs:
   test:
     name: test
+    # A rollback deploys an image that already passed CI; re-testing it adds nothing.
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -28,20 +42,20 @@ jobs:
     env:
       TZ: ${{ matrix.tz }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Show host time zone
         run: |
           date
           cat /etc/timezone 2>/dev/null || true
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           global-json-file: global.json
 
       # setup-dotnet's built-in cache needs packages.lock.json, which this
       # repo does not use, so cache the global packages folder directly.
-      - uses: actions/cache@v4
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.nuget/packages
           key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj') }}
@@ -62,7 +76,7 @@ jobs:
 
       - name: Upload test results
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: test-results-${{ strategy.job-index }}
           path: TestResults/
@@ -70,13 +84,131 @@ jobs:
 
   image:
     name: image
+    # Rollback deploys an existing image, so there is nothing to build.
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
+    # Least privilege: packages:write exists only on this job, and PR runs
+    # never reach the push steps below.
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # The runtime image must contain tz data or every run throws when it
       # resolves America/New_York. --self-check proves that without network
-      # or config. Nothing is pushed anywhere.
+      # or config. PR runs stop here and push nothing.
       - run: docker build -t precip:ci .
 
       - run: docker run --rm precip:ci --self-check
+
+      # The tag is the commit, truncated to 12 chars, so every image maps
+      # back to exactly one commit and a rollback is just "deploy that sha".
+      - id: meta
+        run: echo "image=ghcr.io/hobbesmd/precipitation-notification:${GITHUB_SHA:0:12}" >> "$GITHUB_OUTPUT"
+
+      # Publishing happens only for main pushes: PR code must never write to
+      # the registry.
+      - name: Log in to ghcr.io
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Tags are immutable by policy: a deployed sha must always mean the same
+      # bytes, or rollback would not restore what actually ran before.
+      - name: Push image (never overwrites)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}
+        run: |
+          if docker manifest inspect "$IMAGE" >/dev/null 2>&1; then
+            echo "::error::$IMAGE already exists; refusing to overwrite"
+            exit 1
+          fi
+          docker tag precip:ci "$IMAGE"
+          docker push "$IMAGE"
+
+  # The migration guard script has its own tests; they diff commit history, so
+  # they need the full clone.
+  guard-test:
+    name: guard-test
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - run: bash deploy/azure/test-migration-guard.sh
+
+  deploy:
+    name: deploy
+    needs: [test, image, guard-test]
+    # always() lets this run on workflow_dispatch, where the needed jobs are
+    # skipped. On push it still requires all three to have succeeded; always()
+    # alone would otherwise deploy after a failure.
+    if: >-
+      always() && (
+        github.event_name == 'workflow_dispatch' ||
+        (github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+         needs.test.result == 'success' && needs.image.result == 'success' &&
+         needs.guard-test.result == 'success')
+      )
+    runs-on: ubuntu-latest
+    environment: production
+    # Serialize deploys but never cancel one mid-flight: a half-applied
+    # revision update is worse than a queued one.
+    concurrency:
+      group: production
+      cancel-in-progress: false
+    # id-token: write is for OIDC federation to Azure; no stored credentials.
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      # Full history: the migration guard diffs the currently deployed sha
+      # against the target.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - run: az extension add --name containerapp --upgrade -y
+
+      # All expressions go through env: so user-controlled input (inputs.sha)
+      # is data to the shell, never script text (script injection).
+      - name: Resolve image
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUSHED_IMAGE: ${{ needs.image.outputs.image }}
+          INPUT_SHA: ${{ inputs.sha }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            if ! [[ "$INPUT_SHA" =~ ^[0-9a-f]{12}$ ]]; then
+              echo "::error::sha must be exactly 12 lowercase hex chars"
+              exit 1
+            fi
+            IMAGE="ghcr.io/hobbesmd/precipitation-notification:${INPUT_SHA}"
+            # The package is public, so no login is needed. Fail now rather
+            # than after Azure has accepted a revision that cannot pull.
+            docker manifest inspect "$IMAGE" >/dev/null
+          else
+            IMAGE="$PUSHED_IMAGE"
+          fi
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+
+      # deploy-image.sh records the deployed and previous image in the step summary.
+      - name: Deploy
+        env:
+          MIGRATIONS_APPLIED: ${{ github.event_name == 'workflow_dispatch' && inputs.migrations_applied || false }}
+        run: bash deploy/azure/deploy-image.sh
