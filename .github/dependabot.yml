@@ -1,0 +1,8 @@
+version: 2
+updates:
+  # Actions are pinned to commit shas, which never move on their own; this is
+  # what keeps the pins from going stale.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

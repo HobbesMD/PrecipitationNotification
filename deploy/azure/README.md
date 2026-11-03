@@ -27,7 +27,9 @@ migrations: you apply them explicitly (see [Migrate](#migrate)).
   ```
 
 - The image pushed to GHCR, tagged with a git sha:
-  `ghcr.io/hobbesmd/precipitation-notification:<git-sha>`. The script only
+  `ghcr.io/hobbesmd/precipitation-notification:<git-sha>`. CI pushes it now, on
+  every merge to main ([Block 7](#block-7-continuous-deployment)); push by hand
+  only for the very first deploy or in an emergency. The script only
   accepts a 7–40 character hex tag or an `@sha256:` digest, so every run maps
   to a commit. `:latest`, `:main` and untagged images are rejected.
 - The GHCR package set to **public** (once, in the package's settings on
@@ -192,6 +194,114 @@ and watch the check return to "up".
 - **Pointing `Nws__BaseUrl` at a dead host.** For a location that has run before,
   the hourly forecast URL is cached on its row (D27), so the base URL is used only
   for a fresh `/points` lookup and NWS still answers.
+
+## Block 7: continuous deployment
+
+### How it works
+
+Every push to main runs the tests, builds the image and pushes
+`ghcr.io/hobbesmd/precipitation-notification:<sha12>` (the first 12 characters
+of the commit sha) using the workflow's `GITHUB_TOKEN`. The `deploy` job, which
+runs in the GitHub environment `production`, then logs in to Azure with OIDC and
+runs `deploy/azure/deploy-image.sh`. That script updates only the image and
+`service.version` (inside `OTEL_RESOURCE_ATTRIBUTES`); the secrets, the cron and
+the sizing stay exactly as `deploy.sh` set them.
+
+`deploy.sh` remains the tool for creating the job or changing its configuration.
+After you change configuration with it, the next CI deploy just swaps the image.
+
+### One-time setup
+
+1. Run `setup-oidc.sh` (logged in with `az login`, with rights to create app
+   registrations and role assignments):
+
+   ```bash
+   deploy/azure/setup-oidc.sh
+   ```
+
+   It creates the Entra app `gh-precip-deploy`, its service principal, one
+   federated credential (`github-production`, trusting only
+   `repo:HobbesMD/PrecipitationNotification:environment:production`), and a custom
+   role, **Precip Job Deployer**, that can only read and write the job's definition
+   (`Microsoft.App/jobs/read`, `Microsoft.App/jobs/write`), assigned on the job
+   alone. It is deliberately not `Contributor`: that includes
+   `jobs/listSecrets/action`, which reads every secret value. It never
+   creates a client secret or certificate. Re-running is safe; if a credential
+   with that name exists but trusts something else, it stops rather than
+   overwrite it. It prints three values at the end.
+
+   If a CI deploy is later refused for missing the
+   `Microsoft.App/managedEnvironments/join/action` permission, re-run it with
+   `JOIN_ENV=1`. That adds a custom role that grants only that action, assigned
+   on the environment. It is off by default because we try the least privilege
+   first. A new custom role can take a minute to propagate; the script retries.
+
+2. In GitHub: Settings, Environments, create **`production`**. Under deployment
+   branches choose "Selected branches and tags" and add `main`. Add the three
+   printed values as environment **variables** (not secrets): `AZURE_CLIENT_ID`,
+   `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`. They are identifiers, not
+   credentials. With OIDC there is no secret at all; the federated subject is the
+   lock, and the branch rule is what stops any other branch from presenting it.
+
+3. In the GHCR package's settings, under "Manage Actions access", add this
+   repository with **Write**. The package was first pushed by hand, so it isn't
+   linked to the repository's `GITHUB_TOKEN` yet and the first CI push would be
+   denied.
+
+### When the migration guard stops a deploy
+
+`deploy-image.sh` compares the commit being deployed with the one currently
+deployed. If migration files changed in between, it stops with **exit 3** and
+lists them. That means the new image expects a schema that Neon may not have yet,
+and a deploy must never change the schema as a side effect. To proceed:
+
+1. Apply the migrations: [`--migrate`](#migrate).
+2. In GitHub: Actions, CI, "Run workflow" on `main`, with `sha` set to the
+   12-character sha and `migrations_applied` ticked.
+
+### Rollback
+
+Run the workflow again (Actions, CI, "Run workflow") with `sha` set to the
+previous 12-character sha. To see what is deployed right now:
+
+```bash
+az containerapp job show -n job-precip-nightly -g rg-precip \
+  --query "properties.template.containers[0].image" -o tsv
+```
+
+A rollback across a schema change also stops at the migration guard.
+
+### When a deploy fails after the image was pushed
+
+"Re-run all jobs" is safe. `publish` sees the tag already exists (this commit
+published it on the first attempt), skips the push, and the deploy runs again.
+A tag is never overwritten. If `publish` instead says it "could not tell whether"
+the image exists (a registry error, not "manifest unknown"), wait and re-run.
+
+### Running it locally
+
+For a rollback without GitHub, or if Actions is down, from anywhere in a clone
+with full git history (the guard needs it):
+
+```bash
+IMAGE=ghcr.io/hobbesmd/precipitation-notification:<sha12> bash deploy/azure/deploy-image.sh
+```
+
+### What CI never does
+
+- **Hold app secrets.** The connection string, ntfy topic, heartbeat URL and
+  OTLP token live only on the job, and the deploy role can't list their values.
+  Be honest about the limit, though: an identity that can change the job's image
+  can run any code with those secrets mounted. The real lock is the federated
+  subject (only the main-only `production` environment can sign in), not the
+  role.
+- **Run migrations.** Schema changes are a deliberate, separate step (above).
+- **Start an execution.** An execution override replaces the job's whole
+  environment (see the [Drill](#drill-prove-the-alarm-reaches-your-phone)
+  section), so a smoke run from CI would be a real run, not a test. The 23:00 UTC
+  run plus the heartbeat is the smoke test. A run that fails reports at once;
+  one that never starts (an image that won't pull, a crash before the host
+  starts) alerts when the 1-hour grace period ends, by 00:00 UTC.
 
 ## Migrate
 
