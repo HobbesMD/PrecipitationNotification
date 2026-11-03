@@ -54,6 +54,13 @@ exists() {
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
+# az reads @file arguments itself. With MSYS_NO_PATHCONV set, Windows az can't
+# see a Git Bash path like /tmp/..., so hand it the native path when cygpath
+# exists (Git Bash); elsewhere the path is already native.
+native() {
+  if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi
+}
+
 # Resolve the Azure targets first, so a typo or an undeployed job fails before
 # anything is created in Entra.
 if ! job_id=$(az containerapp job show -n "$AZ_JOB" -g "$AZ_RG" --query id -o tsv | tr -d '\r') || [[ -z "$job_id" ]]; then
@@ -117,7 +124,7 @@ else
   "audiences": ["api://AzureADTokenExchange"]
 }
 JSON
-  az ad app federated-credential create --id "$app_id" --parameters "@$tmp/fedcred.json" -o none
+  az ad app federated-credential create --id "$app_id" --parameters "@$(native "$tmp/fedcred.json")" -o none
 fi
 
 # --- Roles ---------------------------------------------------------------------
@@ -136,8 +143,8 @@ fi
 ensure_role() {
   local name="$1" desc="$2" scope="$3"; shift 3
   local n actions
-  n=$(az role definition list --custom-role-only true --name "$name"     --query "length(@)" -o tsv | tr -d '
-')
+  n=$(az role definition list --custom-role-only true --name "$name" \
+    --query "length(@)" -o tsv | tr -d '\r')
   if [[ "$n" -gt 0 ]]; then
     echo "Custom role '$name' exists."
     return
@@ -156,13 +163,13 @@ ensure_role() {
   "AssignableScopes": ["$scope"]
 }
 JSON
-  az role definition create --role-definition "@$tmp/role.json" -o none
+  az role definition create --role-definition "@$(native "$tmp/role.json")" -o none
 }
 
 has_role() {  # usage: has_role ROLE SCOPE
   local n
-  n=$(az role assignment list --assignee-object-id "$sp_object_id" --scope "$2"     --role "$1" --query "length(@)" -o tsv 2>/dev/null | tr -d '
-') || n=0
+  n=$(az role assignment list --assignee-object-id "$sp_object_id" --scope "$2" \
+    --role "$1" --query "length(@)" -o tsv 2>/dev/null | tr -d '\r') || n=0
   [[ "${n:-0}" -gt 0 ]]
 }
 
@@ -177,7 +184,9 @@ ensure_assignment() {
   # A new custom role definition can take a minute to propagate, and the
   # assignment is refused until it has. Retry briefly, then fail loudly.
   for attempt in 1 2 3 4 5 6; do
-    if az role assignment create --assignee-object-id "$sp_object_id"          --assignee-principal-type ServicePrincipal          --role "$role" --scope "$scope" -o none; then
+    if az role assignment create --assignee-object-id "$sp_object_id" \
+         --assignee-principal-type ServicePrincipal \
+         --role "$role" --scope "$scope" -o none; then
       return
     fi
     echo "  not visible yet (attempt $attempt/6); waiting 10s..." >&2
@@ -187,7 +196,10 @@ ensure_assignment() {
   exit 1
 }
 
-ensure_role "$DEPLOYER_ROLE"   "Read and update one Container Apps job's definition. No secret values (no listSecrets)."   "$job_id"   "Microsoft.App/jobs/read" "Microsoft.App/jobs/write"
+ensure_role "$DEPLOYER_ROLE" \
+  "Read and update one Container Apps job's definition. No secret values (no listSecrets)." \
+  "$job_id" \
+  "Microsoft.App/jobs/read" "Microsoft.App/jobs/write"
 ensure_assignment "$DEPLOYER_ROLE" "$job_id" "$AZ_JOB"
 
 # --- Optional: environment join ---------------------------------------------
@@ -195,12 +207,14 @@ ensure_assignment "$DEPLOYER_ROLE" "$job_id" "$AZ_JOB"
 # the deploy without it first (least privilege) and only set JOIN_ENV=1 if
 # `job update` is refused for missing Microsoft.App/managedEnvironments/join/action.
 if [[ "$JOIN_ENV" == "1" ]]; then
-  if ! env_id=$(az containerapp env show -n "$AZ_ENV" -g "$AZ_RG" --query id -o tsv | tr -d '
-') || [[ -z "$env_id" ]]; then
+  if ! env_id=$(az containerapp env show -n "$AZ_ENV" -g "$AZ_RG" --query id -o tsv | tr -d '\r') || [[ -z "$env_id" ]]; then
     echo "Could not read environment $AZ_ENV in $AZ_RG; stopping." >&2
     exit 1
   fi
-  ensure_role "$JOINER_ROLE"     "Join a Container Apps managed environment, and nothing else."     "$env_id"     "Microsoft.App/managedEnvironments/join/action"
+  ensure_role "$JOINER_ROLE" \
+    "Join a Container Apps managed environment, and nothing else." \
+    "$env_id" \
+    "Microsoft.App/managedEnvironments/join/action"
   ensure_assignment "$JOINER_ROLE" "$env_id" "$AZ_ENV"
 fi
 
