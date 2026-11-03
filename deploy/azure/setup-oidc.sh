@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Creates or updates the identity GitHub Actions uses to deploy: an Entra app
 # registration + service principal, trusted via a federated credential (OIDC), with
-# the Contributor role on the nightly job and nothing else.
+# a custom role that can read and update the nightly job's definition, and nothing
+# else (no secret values).
 # Safe to re-run: every object is looked up first, then created only if missing.
 #
 # Optional env: AZ_RG (rg-precip)  AZ_ENV (cae-precip)  AZ_JOB (job-precip-nightly)
@@ -32,6 +33,7 @@ CRED_NAME="github-production"
 # environment `production` (itself restricted to the main branch) can present it.
 SUBJECT="repo:${GH_REPO}:environment:production"
 JOINER_ROLE="Container Apps Environment Joiner"
+DEPLOYER_ROLE="Precip Job Deployer"
 
 # `show` exits non-zero for "doesn't exist" AND for real errors (expired login,
 # throttling, missing permission). Only the first may fall through to create;
@@ -118,75 +120,88 @@ JSON
   az ad app federated-credential create --id "$app_id" --parameters "@$tmp/fedcred.json" -o none
 fi
 
-# --- Role: Contributor on the job only --------------------------------------
-# Scoped to the one job resource, never the resource group or subscription: a
-# leaked or abused deploy identity can touch this job and nothing else.
-has_role() {  # usage: has_role ROLE SCOPE
-  local n
-  n=$(az role assignment list --assignee-object-id "$sp_object_id" --scope "$2" \
-    --role "$1" --query "length(@)" -o tsv | tr -d '\r')
-  [[ "$n" -gt 0 ]]
+# --- Roles ---------------------------------------------------------------------
+# Custom roles, not Contributor (review, D53). Contributor on the job includes
+# Microsoft.App/jobs/listSecrets/action, which reads every secret value (database
+# string, ntfy topic, heartbeat URL, OTLP token). The deployer needs to read and
+# write the job definition and nothing more. Even so, write access can point the
+# job at any image, and that image runs with the secrets mounted: the real lock
+# is the federated subject above (main-only `production` environment), not this
+# role. The role narrows the blast radius; it is not the boundary.
+#
+# Both roles are scoped to one resource (assignable there and assigned there),
+# never the resource group or subscription.
+
+# usage: ensure_role NAME DESCRIPTION SCOPE ACTION...
+ensure_role() {
+  local name="$1" desc="$2" scope="$3"; shift 3
+  local n actions
+  n=$(az role definition list --custom-role-only true --name "$name"     --query "length(@)" -o tsv | tr -d '
+')
+  if [[ "$n" -gt 0 ]]; then
+    echo "Custom role '$name' exists."
+    return
+  fi
+  echo "Creating custom role '$name'..."
+  actions=$(printf '"%s",' "$@")
+  cat >"$tmp/role.json" <<JSON
+{
+  "Name": "$name",
+  "IsCustom": true,
+  "Description": "$desc",
+  "Actions": [${actions%,}],
+  "NotActions": [],
+  "DataActions": [],
+  "NotDataActions": [],
+  "AssignableScopes": ["$scope"]
+}
+JSON
+  az role definition create --role-definition "@$tmp/role.json" -o none
 }
 
-if has_role Contributor "$job_id"; then
-  echo "Contributor on $AZ_JOB already assigned."
-else
-  echo "Assigning Contributor on $AZ_JOB..."
-  az role assignment create --assignee-object-id "$sp_object_id" \
-    --assignee-principal-type ServicePrincipal \
-    --role Contributor --scope "$job_id" -o none
-fi
+has_role() {  # usage: has_role ROLE SCOPE
+  local n
+  n=$(az role assignment list --assignee-object-id "$sp_object_id" --scope "$2"     --role "$1" --query "length(@)" -o tsv 2>/dev/null | tr -d '
+') || n=0
+  [[ "${n:-0}" -gt 0 ]]
+}
+
+# usage: ensure_assignment ROLE SCOPE LABEL
+ensure_assignment() {
+  local role="$1" scope="$2" label="$3" attempt
+  if has_role "$role" "$scope"; then
+    echo "'$role' on $label already assigned."
+    return
+  fi
+  echo "Assigning '$role' on $label..."
+  # A new custom role definition can take a minute to propagate, and the
+  # assignment is refused until it has. Retry briefly, then fail loudly.
+  for attempt in 1 2 3 4 5 6; do
+    if az role assignment create --assignee-object-id "$sp_object_id"          --assignee-principal-type ServicePrincipal          --role "$role" --scope "$scope" -o none; then
+      return
+    fi
+    echo "  not visible yet (attempt $attempt/6); waiting 10s..." >&2
+    sleep 10
+  done
+  echo "Could not assign '$role' on $label; re-run in a few minutes." >&2
+  exit 1
+}
+
+ensure_role "$DEPLOYER_ROLE"   "Read and update one Container Apps job's definition. No secret values (no listSecrets)."   "$job_id"   "Microsoft.App/jobs/read" "Microsoft.App/jobs/write"
+ensure_assignment "$DEPLOYER_ROLE" "$job_id" "$AZ_JOB"
 
 # --- Optional: environment join ---------------------------------------------
 # Updating a job can require permission to "join" its managed environment. We try
 # the deploy without it first (least privilege) and only set JOIN_ENV=1 if
 # `job update` is refused for missing Microsoft.App/managedEnvironments/join/action.
 if [[ "$JOIN_ENV" == "1" ]]; then
-  if ! env_id=$(az containerapp env show -n "$AZ_ENV" -g "$AZ_RG" --query id -o tsv | tr -d '\r') || [[ -z "$env_id" ]]; then
+  if ! env_id=$(az containerapp env show -n "$AZ_ENV" -g "$AZ_RG" --query id -o tsv | tr -d '
+') || [[ -z "$env_id" ]]; then
     echo "Could not read environment $AZ_ENV in $AZ_RG; stopping." >&2
     exit 1
   fi
-  role_count=$(az role definition list --custom-role-only true --name "$JOINER_ROLE" \
-    --query "length(@)" -o tsv | tr -d '\r')
-  if [[ "$role_count" -gt 0 ]]; then
-    echo "Custom role '$JOINER_ROLE' exists."
-  else
-    echo "Creating custom role '$JOINER_ROLE'..."
-    cat >"$tmp/role.json" <<JSON
-{
-  "Name": "$JOINER_ROLE",
-  "IsCustom": true,
-  "Description": "Join a Container Apps managed environment, and nothing else.",
-  "Actions": ["Microsoft.App/managedEnvironments/join/action"],
-  "NotActions": [],
-  "AssignableScopes": ["$env_id"]
-}
-JSON
-    az role definition create --role-definition "@$tmp/role.json" -o none
-  fi
-
-  if has_role "$JOINER_ROLE" "$env_id"; then
-    echo "'$JOINER_ROLE' on $AZ_ENV already assigned."
-  else
-    echo "Assigning '$JOINER_ROLE' on $AZ_ENV..."
-    # A new custom role definition can take a minute to propagate, and the
-    # assignment is refused until it has. Retry briefly, then fail loudly.
-    assigned=0
-    for attempt in 1 2 3 4 5 6; do
-      if az role assignment create --assignee-object-id "$sp_object_id" \
-           --assignee-principal-type ServicePrincipal \
-           --role "$JOINER_ROLE" --scope "$env_id" -o none; then
-        assigned=1
-        break
-      fi
-      echo "  not visible yet (attempt $attempt/6); waiting 10s..." >&2
-      sleep 10
-    done
-    if [[ $assigned -ne 1 ]]; then
-      echo "Could not assign '$JOINER_ROLE'; re-run in a few minutes." >&2
-      exit 1
-    fi
-  fi
+  ensure_role "$JOINER_ROLE"     "Join a Container Apps managed environment, and nothing else."     "$env_id"     "Microsoft.App/managedEnvironments/join/action"
+  ensure_assignment "$JOINER_ROLE" "$env_id" "$AZ_ENV"
 fi
 
 echo

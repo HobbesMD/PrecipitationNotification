@@ -17,8 +17,8 @@ repo=$(mktemp -d)
 trap 'rm -rf "$repo"' EXIT
 cd "$repo"
 
-# The guard must watch its default path, so the test doesn't override it.
-unset MIGRATIONS_PATH
+# The watched path is fixed; an inherited variable must not move it.
+export MIGRATIONS_PATH="nowhere/"
 
 git init -q .
 git config user.name "migration-guard test"
@@ -85,6 +85,17 @@ check "missing argument"                  1 "Usage"                   -- "$img:$
 check "12-char refs: B->C blocks"         3 "0002.cs"                 -- "$img:${B:0:12}" "${C:0:12}" false
 check "12-char refs: C->D passes"         0 "No migration changes"    -- "$img:${C:0:12}" "${D:0:12}" false
 check "12-char vs full: same commit"      0 "already deployed"        -- "$img:${B:0:12}" "$B" false
+
+# Run from a subdirectory: the pathspec must still resolve from the top of the
+# checkout, or a schema change passes (review finding, D53).
+code=0
+out=$(cd "$repo/src/Worker" && bash "$guard" "$img:$B" "$C" false 2>&1) || code=$?
+if [[ "$code" -eq 3 && "$out" == *"0002.cs"* ]]; then
+  echo "PASS  run from a subdirectory still blocks"
+else
+  echo "FAIL  run from a subdirectory still blocks: got exit $code: $out"
+  failures=$((failures + 1))
+fi
 
 # Running outside any repository must fail closed, not report "no changes".
 outside=$(mktemp -d)

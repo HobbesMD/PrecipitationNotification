@@ -221,8 +221,11 @@ After you change configuration with it, the next CI deploy just swaps the image.
 
    It creates the Entra app `gh-precip-deploy`, its service principal, one
    federated credential (`github-production`, trusting only
-   `repo:HobbesMD/PrecipitationNotification:environment:production`), and the
-   `Contributor` role scoped to the job alone, not the resource group. It never
+   `repo:HobbesMD/PrecipitationNotification:environment:production`), and a custom
+   role, **Precip Job Deployer**, that can only read and write the job's definition
+   (`Microsoft.App/jobs/read`, `Microsoft.App/jobs/write`), assigned on the job
+   alone. It is deliberately not `Contributor`: that includes
+   `jobs/listSecrets/action`, which reads every secret value. It never
    creates a client secret or certificate. Re-running is safe; if a credential
    with that name exists but trusts something else, it stops rather than
    overwrite it. It prints three values at the end.
@@ -268,10 +271,17 @@ az containerapp job show -n job-precip-nightly -g rg-precip \
 
 A rollback across a schema change also stops at the migration guard.
 
+### When a deploy fails after the image was pushed
+
+"Re-run all jobs" is safe. `publish` sees the tag already exists (this commit
+published it on the first attempt), skips the push, and the deploy runs again.
+A tag is never overwritten. If `publish` instead says it "could not tell whether"
+the image exists (a registry error, not "manifest unknown"), wait and re-run.
+
 ### Running it locally
 
-For a rollback without GitHub, or if Actions is down, from the repo root with
-full git history (the guard needs it):
+For a rollback without GitHub, or if Actions is down, from anywhere in a clone
+with full git history (the guard needs it):
 
 ```bash
 IMAGE=ghcr.io/hobbesmd/precipitation-notification:<sha12> bash deploy/azure/deploy-image.sh
@@ -279,13 +289,19 @@ IMAGE=ghcr.io/hobbesmd/precipitation-notification:<sha12> bash deploy/azure/depl
 
 ### What CI never does
 
-- **Hold app secrets.** The connection string, ntfy topic and heartbeat URL live
-  only on the job. CI holds nothing that can read them.
+- **Hold app secrets.** The connection string, ntfy topic, heartbeat URL and
+  OTLP token live only on the job, and the deploy role can't list their values.
+  Be honest about the limit, though: an identity that can change the job's image
+  can run any code with those secrets mounted. The real lock is the federated
+  subject (only the main-only `production` environment can sign in), not the
+  role.
 - **Run migrations.** Schema changes are a deliberate, separate step (above).
 - **Start an execution.** An execution override replaces the job's whole
   environment (see the [Drill](#drill-prove-the-alarm-reaches-your-phone)
   section), so a smoke run from CI would be a real run, not a test. The 23:00 UTC
-  run plus the heartbeat is the smoke test: a bad deploy alerts by 00:00 UTC.
+  run plus the heartbeat is the smoke test. A run that fails reports at once;
+  one that never starts (an image that won't pull, a crash before the host
+  starts) alerts when the 1-hour grace period ends, by 00:00 UTC.
 
 ## Migrate
 

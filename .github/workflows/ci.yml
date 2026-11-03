@@ -43,6 +43,8 @@ jobs:
       TZ: ${{ matrix.tz }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Show host time zone
         run: |
@@ -87,19 +89,18 @@ jobs:
     # Rollback deploys an existing image, so there is nothing to build.
     if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
-    # Least privilege: packages:write exists only on this job, and PR runs
-    # never reach the push steps below.
-    permissions:
-      contents: read
-      packages: write
+    # No packages:write here. This job runs PR code; the registry write lives in
+    # `publish`, which only main pushes reach (review, D53).
     outputs:
       image: ${{ steps.meta.outputs.image }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # The runtime image must contain tz data or every run throws when it
       # resolves America/New_York. --self-check proves that without network
-      # or config. PR runs stop here and push nothing.
+      # or config.
       - run: docker build -t precip:ci .
 
       - run: docker run --rm precip:ci --self-check
@@ -109,32 +110,23 @@ jobs:
       - id: meta
         run: echo "image=ghcr.io/hobbesmd/precipitation-notification:${GITHUB_SHA:0:12}" >> "$GITHUB_OUTPUT"
 
-      # Publishing happens only for main pushes: PR code must never write to
-      # the registry.
-      - name: Log in to ghcr.io
+      # Hand the exact bytes that passed --self-check to `publish`, instead of
+      # rebuilding there. Main pushes only; PR runs stop here.
+      - name: Save image
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        run: docker save precip:ci | gzip > image.tar.gz
+
+      - name: Upload image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          name: image
+          path: image.tar.gz
+          retention-days: 1
+          if-no-files-found: error
 
-      # Tags are immutable by policy: a deployed sha must always mean the same
-      # bytes, or rollback would not restore what actually ran before.
-      - name: Push image (never overwrites)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        env:
-          IMAGE: ${{ steps.meta.outputs.image }}
-        run: |
-          if docker manifest inspect "$IMAGE" >/dev/null 2>&1; then
-            echo "::error::$IMAGE already exists; refusing to overwrite"
-            exit 1
-          fi
-          docker tag precip:ci "$IMAGE"
-          docker push "$IMAGE"
-
-  # The migration guard script has its own tests; they diff commit history, so
-  # they need the full clone.
+  # The migration guard and the image-only deploy script have their own tests.
+  # Both build throwaway repos, so no history is needed here.
   guard-test:
     name: guard-test
     if: github.event_name != 'workflow_dispatch'
@@ -142,27 +134,79 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
+          persist-credentials: false
 
       - run: bash deploy/azure/test-migration-guard.sh
 
+      - run: bash deploy/azure/test-deploy-image.sh
+
+  # The only job with packages:write. It runs only for a push to main after
+  # every test has passed, so no image is published for a commit that failed CI.
+  publish:
+    name: publish
+    needs: [test, image, guard-test]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    outputs:
+      image: ${{ needs.image.outputs.image }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: image
+
+      - run: gunzip -c image.tar.gz | docker load
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Tags are never overwritten: a deployed sha must always mean the same
+      # bytes, or a rollback would not restore what actually ran.
+      # - The tag already exists: an earlier attempt of this commit published
+      #   it ("Re-run all jobs" after a failed deploy). Skip the push and carry
+      #   on to deploy; the tag is the commit, so nothing is replaced.
+      # - "manifest unknown": absent, so push it.
+      # - Anything else (429, 5xx, auth): we can't tell, so stop. Reading an
+      #   error as "absent" would push over an existing tag (review, D53).
+      - name: Push image (never overwrites)
+        env:
+          IMAGE: ${{ needs.image.outputs.image }}
+        run: |
+          if out=$(docker manifest inspect "$IMAGE" 2>&1); then
+            echo "::notice::$IMAGE already exists (an earlier attempt published it); not pushing"
+            exit 0
+          fi
+          if ! grep -qiE 'manifest unknown|not found' <<<"$out"; then
+            echo "::error::could not tell whether $IMAGE exists; refusing to push"
+            echo "$out"
+            exit 1
+          fi
+          docker tag precip:ci "$IMAGE"
+          docker push "$IMAGE"
+
   deploy:
     name: deploy
-    needs: [test, image, guard-test]
-    # always() lets this run on workflow_dispatch, where the needed jobs are
-    # skipped. On push it still requires all three to have succeeded; always()
-    # alone would otherwise deploy after a failure.
+    needs: [publish]
+    # !cancelled() lets this run on workflow_dispatch, where `publish` is
+    # skipped, and still respects a cancelled run. On push it requires `publish`
+    # to have succeeded, which itself required test, image and guard-test.
     if: >-
-      always() && (
+      !cancelled() && (
         github.event_name == 'workflow_dispatch' ||
         (github.event_name == 'push' && github.ref == 'refs/heads/main' &&
-         needs.test.result == 'success' && needs.image.result == 'success' &&
-         needs.guard-test.result == 'success')
+         needs.publish.result == 'success')
       )
     runs-on: ubuntu-latest
     environment: production
-    # Serialize deploys but never cancel one mid-flight: a half-applied
-    # revision update is worse than a queued one.
+    # Serialize deploys but never cancel one mid-flight: a half-applied update
+    # is worse than a queued one. GitHub keeps only the newest *pending* run per
+    # group, so with three quick merges the middle one is dropped and the newest
+    # code wins (D50).
     concurrency:
       group: production
       cancel-in-progress: false
@@ -176,6 +220,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         with:
@@ -183,14 +228,22 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      - run: az extension add --name containerapp --upgrade -y
+      # Pinned like the actions (D52): this code runs with the Azure token and
+      # builds the `job update` payload. Dependabot can't bump it; update it by
+      # hand after checking what the new version sends.
+      - name: Install containerapp extension (pinned)
+        env:
+          CONTAINERAPP_EXT_VERSION: 1.3.0b5
+        run: |
+          az extension remove --name containerapp 2>/dev/null || true
+          az extension add --name containerapp --version "$CONTAINERAPP_EXT_VERSION" -y
 
       # All expressions go through env: so user-controlled input (inputs.sha)
       # is data to the shell, never script text (script injection).
       - name: Resolve image
         env:
           EVENT_NAME: ${{ github.event_name }}
-          PUSHED_IMAGE: ${{ needs.image.outputs.image }}
+          PUSHED_IMAGE: ${{ needs.publish.outputs.image }}
           INPUT_SHA: ${{ inputs.sha }}
         run: |
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
@@ -200,7 +253,7 @@ jobs:
             fi
             IMAGE="ghcr.io/hobbesmd/precipitation-notification:${INPUT_SHA}"
             # The package is public, so no login is needed. Fail now rather
-            # than after Azure has accepted a revision that cannot pull.
+            # than after Azure has accepted an image that cannot pull.
             docker manifest inspect "$IMAGE" >/dev/null
           else
             IMAGE="$PUSHED_IMAGE"

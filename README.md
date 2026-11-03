@@ -1810,6 +1810,7 @@ Until Block 7, a release was three commands on my laptop: `docker build`, `docke
 - `test`
 - `image`
 - `guard-test`
+- `publish`
 - `deploy`
 
 #### D48. CI signs in to Azure with OIDC: no stored credential, one environment, one resource
@@ -1817,7 +1818,7 @@ Until Block 7, a release was three commands on my laptop: `docker build`, `docke
 **Decision:** the `deploy` job gets a short-lived Azure token through **OpenID Connect federation**.
 - An Entra app registration (`gh-precip-deploy`) has **no client secret and no certificate**. Its one federated credential trusts tokens from GitHub's issuer whose subject is exactly `repo:HobbesMD/PrecipitationNotification:environment:production`.
 - The GitHub environment `production` accepts deployments from `main` only. A pull request, a fork or another branch can't produce that subject, so it gets no token.
-- The identity is `Contributor` on **the job resource only**, not the resource group or the subscription. Abused, it can repoint this job and nothing else.
+- The identity has one custom role, **Precip Job Deployer** (`Microsoft.App/jobs/read` and `jobs/write`), assigned on **the job resource only**, not the resource group or the subscription. It is not `Contributor`, which can also list the job's secret values (D53).
 - `id-token: write` is granted only to the `deploy` job.
 - The three ids GitHub needs (client, tenant, subscription) are environment **variables**, not secrets. They identify; they don't authenticate.
 - `deploy/azure/setup-oidc.sh` creates all of this idempotently. It refuses to overwrite a federated credential that trusts a different subject, because that would silently change who can deploy.
@@ -1827,7 +1828,7 @@ Until Block 7, a release was three commands on my laptop: `docker build`, `docke
 
 **What would break it:**
 - Widening the federated subject (for example to `ref:refs/heads/*`), or removing the environment's branch rule. Either lets non-main code deploy.
-- Granting the role at resource-group scope "to make it work".
+- Granting the role at resource-group scope, or swapping in `Contributor`, "to make it work".
 - If `job update` also needs `Microsoft.App/managedEnvironments/join/action`, `setup-oidc.sh` with `JOIN_ENV=1` adds a custom role with only that action, on the environment only.
 
 **Proof:** in production (below), not unit tests.
@@ -1844,6 +1845,8 @@ Secrets, cron, sizing, registry and the other environment variables stay exactly
 - **It reads the job back after the update.** The image must equal the target and `service.version` must be the new sha (compared as a whole entry), or the deploy fails. A deploy that says "done" while the old image still runs is the failure this block exists to remove.
 - **The image rules live in `deploy/azure/lib.sh`**, shared with `deploy.sh`, so the two scripts can't drift: a sha tag of 7–40 hex, or a digest.
 
+**The honest limit (D53):** "never enter GitHub" is true, and the deploy role can't list the secrets' values. But it can still change the image, and any image it deploys runs with every secret mounted, so the identity is effectively as powerful as the secrets. The role narrows what an abused token can do quickly and quietly. The lock that actually holds is D48's federated subject: only a job in the main-only `production` environment can sign in at all.
+
 **Rejected:**
 - **Running the full `deploy.sh` in CI.** The configuration would be reproducible from CI, but GitHub would then hold every production secret (the database string, the ntfy topic, the heartbeat URL, the Grafana token), and the identity would need rights to set secrets. A config change is rare and deliberate, so it can stay manual.
 
@@ -1851,13 +1854,21 @@ Secrets, cron, sizing, registry and the other environment variables stay exactly
 - A configuration change made only in `deploy.sh` and never run. CI won't apply it.
 - A future step in the workflow that needs an app secret. That would reopen this decision, not be patched in quietly.
 
-**Tests:** run against a simulated `az` during the build, covering the happy path, a guard block, a missing `OTEL_RESOURCE_ATTRIBUTES`, a read-back mismatch, a failing `show`, and a digest image; plus production (below).
+**Tests:** `deploy/azure/test-deploy-image.sh`, which CI runs in `guard-test`, drives the script against a fake `az` that keeps the job's state in files (11 checks):
+- the happy path changes the image and the `service.version` entry, and keeps the other entries;
+- the update merges (`--set-env-vars`), never touches secrets, cron or registry, and never uses `--replace-env-vars`;
+- a schema change stops at exit 3 with no update call, and `migrations_applied=true` deploys;
+- a missing `OTEL_RESOURCE_ATTRIBUTES` or `service.version` entry, a failing `show`, a digest or `:latest` target and a bad flag all fail closed with no update;
+- an update that didn't take is caught by the image read-back.
+
+Proven by breaking it: switching to `--replace-env-vars` fails 4 checks; removing the image read-back fails the last one.
 
 #### D50. A merge to main deploys automatically; the nightly run is the smoke test
 
 **Decision:**
-- On a push to main, `deploy` runs once `test` (all three time zones), `image` (build, `--self-check`, push) and `guard-test` have succeeded. There is no approval click.
-- Deploys are serialized (`concurrency: production`) and never cancelled mid-flight. Two quick merges deploy in order.
+- On a push to main, `publish` pushes the image only after `test` (all three time zones), `image` (build, `--self-check`) and `guard-test` have succeeded. `deploy` runs after `publish`. There is no approval click.
+- Deploys are serialized (`concurrency: production`) and never cancelled mid-flight. GitHub keeps only the newest *pending* run in the group, so with three quick merges the middle one is dropped: the newest code always wins. A pending rollback is dropped the same way if a merge lands behind it, so I don't merge while rolling back.
+- **"Re-run all jobs" after a failed deploy works.** `publish` sees this commit's tag already exists, skips the push, and the deploy runs again (D53).
 - **The pipeline never starts an execution.** Block 6 showed that an execution override replaces the job's whole environment and can't resolve its secrets. A CI smoke run would therefore be a real run that sends real alerts. Instead, the 23:00 UTC run is the smoke test, and the heartbeat (D39) reports it. A bad deploy reaches me by 00:00 UTC at the latest.
 - **Rollback** is `workflow_dispatch` with a 12-character `sha`. It redeploys an image that already exists (checked before Azure is touched) and doesn't rebuild or retest. `deploy-image.sh` also runs locally, for a rollback without GitHub.
 
@@ -1865,7 +1876,7 @@ Secrets, cron, sizing, registry and the other environment variables stay exactly
 - **A required-reviewer gate on `production`.** Safer for a schema change, but that case has its own guard (D51). For everything else, the click is a step nobody enforces, and a forgotten approval means the night runs on old code with no alarm.
 - **Deploying only by `workflow_dispatch`.** Fully deliberate, but it isn't continuous deployment, and "merged" would stop meaning "live".
 
-**What would break it:** a merge late in the evening deploys minutes before 23:00 UTC. A run that's already executing keeps its old image, and the next run takes the new one. The worst case is a broken image merged at 22:59. The heartbeat catches that at once, and rollback is one dispatch.
+**What would break it:** a merge late in the evening deploys minutes before 23:00 UTC. A run that's already executing keeps its old image, and the next run takes the new one. The worst case is a broken image merged at 22:59. If it runs and fails, the heartbeat alerts at once. If it never starts (it won't pull, or crashes before the host starts), the alert comes when the grace period ends, by 00:00 UTC. Either way, rollback is one dispatch.
 
 #### D51. The migration guard: a deploy stops if the schema changed, until I've migrated
 
@@ -1877,6 +1888,8 @@ Secrets, cron, sizing, registry and the other environment variables stay exactly
   1. run `Worker --migrate`;
   2. re-run the deploy by dispatch with `migrations_applied=true`.
 - **It works in both directions.** `git diff A B` lists the same paths as `git diff B A`, so a **rollback** across a migration stops too. Old code against a newer schema needs a human to confirm it's compatible.
+- **It diffs from the top of the checkout**, wherever it's run from. A git pathspec is relative to the current directory, so the first version, run from `deploy/azure`, found no migrations and passed a real schema change (D53).
+- **The watched path is fixed.** An environment variable that could move it would be a switch that turns the guard off.
 - **It fails closed (exit 1)** whenever it can't decide:
   - a digest-pinned deployed image (a digest names bytes, not a commit), even next to a tag;
   - a mutable or missing tag;
@@ -1896,26 +1909,71 @@ Secrets, cron, sizing, registry and the other environment variables stay exactly
 - A schema change that doesn't live in `src/Persistence/Migrations/` (a moved folder, or raw SQL somewhere else).
 - Ticking `migrations_applied` without having migrated. D28's exit 6 is still behind it.
 
-**Tests:** `deploy/azure/test-migration-guard.sh`, which CI runs as `guard-test`. It builds a throwaway repo with four commits: A (first migration), B (code only), C (second migration), D (docs only). It then checks 22 cases:
+**Tests:** `deploy/azure/test-migration-guard.sh`, which CI runs as `guard-test`. It builds a throwaway repo with four commits: A (first migration), B (code only), C (second migration), D (docs only). It then checks 23 cases:
 - B→B is already deployed (0); A→B and C→D pass (0);
 - B→C and B→D block (3) and name `0002.cs`; the rollback D→B blocks (3);
 - the override passes (0);
 - an unknown sha, a digest ref, a tag-and-digest ref, `:latest`, an untagged ref, a non-hex target, a bad flag, a missing argument and running outside a repo all fail closed (1);
-- 12-character and full shas behave the same.
+- 12-character and full shas behave the same;
+- run from a subdirectory, B→C still blocks (3), with an inherited `MIGRATIONS_PATH` set throughout to prove it can't move the watched path.
 
-With the guard mutated to always exit 0, all 22 cases fail.
+Proven by breaking it: with the guard mutated to always exit 0, every case fails; with the move to the top of the checkout removed, the subdirectory case fails.
 
 #### D52. Supply chain: pinned actions, the image pushed only from main, and no tag is ever overwritten
 
 **Decision:**
 - **Every `uses:` is pinned to a full commit sha**, with the version in a comment. A tag can be moved by whoever controls the action's repo, and the `deploy` job holds an Azure token. Dependabot (`.github/dependabot.yml`, weekly) proposes pin updates as reviewable PRs.
-- **Permissions are least privilege.** The top level is `contents: read`. `packages: write` is on `image` only, `id-token: write` on `deploy` only.
-- **The image is pushed with `GITHUB_TOKEN`**, only on a push to main. A PR build still builds and runs `--self-check`, but pushes nothing. No personal access token exists.
-- **Tags are never overwritten.** Before pushing `:<sha12>`, CI checks whether the tag exists and refuses if it does. A deployed sha must always mean the same bytes, or a rollback wouldn't restore what actually ran.
+- **The containerapp CLI extension is pinned too** (`--version`). It runs with the Azure token and builds the `job update` payload. Dependabot can't bump it, so updating it is a manual, reviewed change.
+- **Permissions are least privilege.** The top level is `contents: read`. `packages: write` exists only on `publish`, which runs only for a push to main; `id-token: write` only on `deploy`. Every checkout sets `persist-credentials: false`, so no job leaves its token in `.git/config`.
+- **The image is pushed with `GITHUB_TOKEN`**, only by `publish`. A PR build runs in `image`, which has no write permission at all: it builds and runs `--self-check`, and that's it. `publish` pushes the exact bytes `image` checked (passed as an artifact, not rebuilt). No personal access token exists.
+- **Tags are never overwritten.** Before pushing `:<sha12>`, `publish` asks the registry:
+  - the tag exists: an earlier attempt of the same commit published it, so it skips the push;
+  - "manifest unknown": it pushes;
+  - any other answer (rate limit, 5xx, auth): it stops, because "couldn't tell" must not mean "absent".
+
+  A deployed sha must always mean the same bytes, or a rollback wouldn't restore what actually ran.
 - **No expression is interpolated into a script.** Every `${{ }}` reaches `run:` through `env:`, so the user-typed `sha` input is data, never shell text. It's also validated against `^[0-9a-f]{12}$`.
 
 **Rejected:**
 - **Version tags (`@v4`).** Convenient, and auto-updated, but mutable. It's the hole a compromised action uses.
 - **Deploying by digest.** It's stronger than "tags are never overwritten", but the migration guard needs a commit (D51), and the trace's `service.version` should read as one too.
 
-**What would break it:** a new step added with a tag instead of a sha, or a `${{ inputs.* }}` written straight into `run:`. The independent review checks both.
+**What would break it:**
+- A new step added with a tag instead of a sha, or a `${{ inputs.* }}` written straight into `run:`.
+- A PR from a branch in this repo can edit the workflow itself, permissions included. Job-level permissions stop mistakes, not someone with write access to the repo. The `production` environment's branch rule is what keeps that code away from Azure (D48).
+
+### Block 7: independent review
+
+After D48–D52, a separate reviewer that wrote none of the code checked the branch. It confirmed:
+- **No `${{ }}` expression is written into a `run:` script**, and every action is pinned to a full sha that exists upstream.
+- **The federated subject is exactly `environment:production`**, no client secret is ever created, and `setup-oidc.sh` stops on a conflicting credential or a duplicate app name.
+- **`deploy` is skipped** when any earlier job fails or is cancelled, and a dispatch checks the image exists before touching Azure.
+- **The `migrations_applied` expression** gives `false` on every push and the input's value on a dispatch.
+- **Digest refs, missing commits and ambiguous short shas** all fail the guard closed.
+
+It found two high-severity defects, four medium and two low. I fixed all eight.
+
+#### D53. Review: the guard passed a schema change from a subdirectory; the deploy role could read the secrets
+
+**High: the guard depended on the current directory.**
+- **The bug:** `git diff -- src/Persistence/Migrations/` takes the path relative to where it's run. Run from `deploy/azure` (the natural place for the "run it locally" rollback), it looked for `deploy/azure/src/Persistence/Migrations/`, found nothing, printed "No migration changes" and exited 0 across a real migration. Reproduced on this repo's own history (`b4c3120`→`4b95c10`, which adds `AddAlertProvider`).
+- **The fix:** the guard moves to the top of the checkout before diffing. The `MIGRATIONS_PATH` override is gone too: it was meant for the tests, but an environment variable that moves the watched path is a switch that turns the guard off.
+- **Tests:** `run from a subdirectory still blocks`; the whole test runs with `MIGRATIONS_PATH=nowhere/` exported. Removing the `cd` fails the subdirectory case.
+
+**High: `Contributor` on the job can read every secret.**
+- **The bug:** D49 said CI "holds nothing that can read" the secrets, but `Contributor` includes `Microsoft.App/jobs/listSecrets/action`. With it, `az containerapp job secret list --show-values` prints the database string, the ntfy topic, the heartbeat URL and the Grafana token.
+- **Decision (2026-11-02): a custom role, and honest docs.** The deploy identity now gets **Precip Job Deployer**, with only `Microsoft.App/jobs/read` and `Microsoft.App/jobs/write`, assignable on and assigned to the job. D49 now states the limit: write access can deploy any image, and that image runs with the secrets mounted, so the role narrows the blast radius but the federated subject (D48) is the boundary.
+- **Rejected:** keeping `Contributor` and only fixing the docs. Honest, and the real lock is the same, but a stolen token could read every secret in one call instead of having to build and deploy an image to get them, which is slower and leaves a trail.
+- **What would break it:** `job update` needing an action outside the role, such as `listSecrets` to preserve the secrets in its payload, or the operation-status read it polls. TF.2 proves whether the role is enough; if it isn't, the missing action is added on its own, never by falling back to `Contributor`.
+
+**Medium:**
+- **An error was read as "tag absent".** Any failure of `docker manifest inspect` (a 429, a 5xx, an auth error) meant "push", which could overwrite an existing tag. Now only "manifest unknown" or "not found" counts as absent; anything else stops the push.
+- **"Re-run all jobs" could never deploy.** After a failed deploy, the re-run's push found its own tag and refused. **Decision (2026-11-02): skip if it's the same commit.** An existing tag is now treated as published by an earlier attempt of this commit: the push is skipped and the deploy goes ahead. Nothing is overwritten. **Rejected:** keeping the refusal and documenting "re-run failed jobs only". It's stricter, but it's a trap in the middle of an incident.
+- **D49 named tests that weren't in the repo.** The fake-`az` runs from the build are now `deploy/azure/test-deploy-image.sh`, which CI runs (11 checks, and two mutations it catches).
+- **The containerapp extension was unpinned**, inside the job that holds the Azure token. It's now installed with `--version`; D52 says Dependabot can't bump it.
+
+**Low:**
+- **`packages: write` reached PR code.** A PR from a branch in this repo ran the `image` job with a write token; only a step condition stopped the push. The push moved to its own `publish` job, which runs only for a push to main and only after every test has passed. It pushes the bytes `image` built and checked, passed along as an artifact. Every checkout sets `persist-credentials: false`.
+- **Smaller items:**
+  - `deploy` uses `!cancelled()` instead of `always()`, so cancelling a run stops a dispatch deploy.
+  - D50 now says three quick merges drop the middle one, and that the heartbeat reports a run that never starts only after the grace period.

@@ -7,7 +7,7 @@
 #   target-sha          the commit about to be deployed (7-40 hex)
 #   true|false          migrations_applied: the operator has already run `Worker --migrate`
 #
-# Run from the repo root (CI does). Needs full history: a shallow clone can't see
+# Runs from anywhere inside the checkout. Needs full history: a shallow clone can't see
 # the deployed commit and the guard stops rather than guess.
 #
 # Exit codes:
@@ -26,9 +26,9 @@
 # against a newer schema needs a human to confirm it is compatible.
 set -euo pipefail
 
-# Overridable for test-migration-guard.sh only; production always watches the
-# real migrations folder.
-MIGRATIONS_PATH="${MIGRATIONS_PATH:-src/Persistence/Migrations/}"
+# Not overridable: an environment variable that moved the watched path would be
+# a switch that turns the guard off (review, D53).
+readonly MIGRATIONS_PATH="src/Persistence/Migrations/"
 
 if [[ $# -ne 3 ]]; then
   echo "Usage: $0 <deployed-image-ref> <target-sha> <true|false>" >&2
@@ -74,10 +74,15 @@ if [[ ! "$target_sha" =~ ^[0-9a-f]{7,40}$ ]]; then
   exit 1
 fi
 
-if ! git rev-parse --git-dir >/dev/null 2>&1; then
-  echo "Not inside a git repository (run from the repo root)." >&2
+if ! top=$(git rev-parse --show-toplevel 2>/dev/null) || [[ -z "$top" ]]; then
+  echo "Not inside a git repository (run from the repo checkout)." >&2
   exit 1
 fi
+# A git pathspec is relative to the current directory. Run from deploy/azure, the
+# diff below would look for deploy/azure/src/Persistence/Migrations/, find
+# nothing, and wave a schema change through (review, D53). Always diff from the
+# top of the checkout.
+cd "$top"
 
 # `^{commit}` makes rev-parse insist on a commit, and --verify fails on an
 # abbreviation that matches more than one object, so an ambiguous short sha is
