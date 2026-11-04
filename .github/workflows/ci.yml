@@ -99,8 +99,8 @@ jobs:
           persist-credentials: false
 
       # The runtime image must contain tz data or every run throws when it
-      # resolves America/New_York. --self-check proves that without network
-      # or config.
+      # resolves a location's zone. --self-check proves that with a fixed sample
+      # zone, without network or config.
       - run: docker build -t precip:ci .
 
       - run: docker run --rm precip:ci --self-check

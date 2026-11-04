@@ -29,6 +29,7 @@ later block. Repaid rows stay, struck through, so the history is visible.
 | The WireMock-based resilience tests (`NtfyResilienceTests`, `NwsBreakerIsolationTests`) occasionally time out on a cold first build; reproduced on `main` before Block 6 touched anything. *(New in Block 6.)* | Unscheduled |
 | The Open-Meteo captures hold no precipitation in their 4 days, so wet-night mapping is proven only with hand-built payloads ([D35](#d35-open-meteo-maps-onto-the-same-types-and-its-hours-end-at-their-timestamp)). *(New in Block 5.)* | Real wet capture, when one comes |
 | D33 says the breaker spares later locations the 30 s each when NWS is down. That holds for fast failures. If NWS *hangs*, a sequential pass may never reach the breaker's 4-call minimum, so only about 4 locations start before the 100 s deadline. Derived from the settings, not tested: the breaker test uses 500s. *(New in Block 8.)* | Unscheduled |
+| A null probability counts as 0, so a night of nulls reads as dry and exits 0 ([D58](#d58-review-a-null-probability-counts-as-0-so-an-all-null-night-reads-as-dry)). Missing hours do fail the run. *(New in Block 8.)* | Accepted, unscheduled |
 
 ## Decision log
 
@@ -417,7 +418,7 @@ problem from the brief, created by the decision engine itself.
 `[max(start, now), end)` with no gaps. Overlaps and duplicates are fine. On the
 first gap it throws `IncompleteForecastException`, with the gap's instants, and
 the job exits with code **4**. A dry night is now only ever reported from a
-complete forecast. In Block 6, the heartbeat will see code 4 as a failed run.
+complete forecast *(of hours: a null probability still counts as 0, see [D58](#d58-review-a-null-probability-counts-as-0-so-an-all-null-night-reads-as-dry))*. In Block 6, the heartbeat will see code 4 as a failed run.
 
 **Rejected:** warning but continuing. It still turns "no data" into "no rain"
 whenever the data is entirely missing.
@@ -503,7 +504,7 @@ that doesn't decide the alert ended up preventing it.
 **The principle, now stated once:** *no input that doesn't decide the alert may
 prevent it.* Neither amounts (D11) nor coverage (here) can stop a probability
 hit from reaching the phone. And no missing data may ever produce a "dry"
-verdict (D13).
+verdict (D13). *(Too broad: true of missing hours, not of a null probability. See [D58](#d58-review-a-null-probability-counts-as-0-so-an-all-null-night-reads-as-dry).)*
 
 **Tests:**
 - the reviewer's case (exact gap, 7 hits);
@@ -613,12 +614,12 @@ the local computer.` and exits 5. Back on `-extra`, it exits 0.
 **Decision:** cron `0 23 * * *`. Container Apps cron schedules are always UTC,
 with no time-zone setting, so the local run time moves an hour with DST. It
 stays before the 8 PM window opens in both halves of the year. The alert
-always arrives before the night starts, on a forecast at most an hour or two
-older than it could be.
+always arrives before the night starts, on a forecast a little older than it
+could be.
 
 **Rejected:**
-- **One cron per DST season**, e.g. 00:00 UTC in summer and 01:00 UTC in
-  winter to land on exactly 8 PM. That means editing the schedule twice a
+- **One cron per DST season**, a different UTC time in each to land on
+  exactly 8 PM. That means editing the schedule twice a
   year, or having the app skip whichever run is in the wrong season. Both are
   brittle.
 - **Running hourly and letting the app decide it's evening.** That's correct,
@@ -846,7 +847,7 @@ then sees `Sent` and publishes nothing.
   earlier failed attempt. `ON CONFLICT DO NOTHING` takes no lock on an existing
   row, so without it two senders could both read `Pending` and both publish.
 
-*(There are four cases, not one, and "the next attempt" is Azure's one retry: see [D57](#d57-corrections-what-this-log-overstated-found-while-writing-the-readme).)*
+*(There's more than one case, and "the next attempt" is Azure's one retry: see [D57](#d57-corrections-what-this-log-overstated-found-while-writing-the-readme).)*
 
 **The one gap, chosen on purpose (at-least-once):** exactly-once is impossible
 here, because the side effect lives in ntfy, outside the transaction. Suppose
@@ -1948,7 +1949,7 @@ It found two high-severity defects, four medium and two low. I fixed all eight.
 - **The bug:** D49 said CI "holds nothing that can read" the secrets, but `Contributor` includes `Microsoft.App/jobs/listSecrets/action`. With it, `az containerapp job secret list --show-values` prints the database string, the ntfy topic, the heartbeat URL and the Grafana token.
 - **Decision (2026-11-02): a custom role, and honest docs.** The deploy identity now gets **Precip Job Deployer**, with only `Microsoft.App/jobs/read` and `Microsoft.App/jobs/write`, assignable on and assigned to the job. D49 now states the limit: write access can deploy any image, and that image runs with the secrets mounted, so the role narrows the blast radius but the federated subject (D48) is the boundary.
 - **Rejected:** keeping `Contributor` and only fixing the docs. Honest, and the real lock is the same, but a stolen token could read every secret in one call instead of having to build and deploy an image to get them, which is slower and leaves a trail.
-- **What would break it:** `job update` needing an action outside the role, such as `listSecrets` to preserve the secrets in its payload, or the operation-status read it polls. The first CI deploy proved the role is enough: `job update` needed neither `listSecrets` nor the environment join (see the Block 7 production evidence). If that ever changes, the missing action is added on its own, never by falling back to `Contributor`.
+- **What would break it:** `job update` needing an action outside the role, such as `listSecrets` to preserve the secrets in its payload, or the operation-status read it polls. The first successful CI deploy proved the role is enough: `job update` needed neither `listSecrets` nor the environment join (see D48, In production). If that ever changes, the missing action is added on its own, never by falling back to `Contributor`.
 
 **Medium:**
 - **An error was read as "tag absent".** Any failure of `docker manifest inspect` (a 429, a 5xx, an auth error) meant "push", which could overwrite an existing tag. Now only "manifest unknown" or "not found" counts as absent; anything else stops the push.
@@ -1978,11 +1979,11 @@ Through Block 7 the README was one vague sentence, the run commands, and about 1
 - `git log -L` and blame on a log entry now stop at the move commit, so older history needs `git log --follow` or a look at the commit before it.
 - Two documents can drift. The README summarizes; this file stays the source of truth, and a README claim must trace to an entry here or to the code.
 
-**How the move stayed safe:** heading levels didn't change, so every `#dNN` link inside the log kept working as it was. The moved text is byte-identical to the old README from `## Debt ledger` down. No file outside the README linked to a log anchor, and code comments cite plain numbers like "D25", which still resolve.
+**How the move stayed safe:** heading levels didn't change, so every `#dNN` link inside the log kept working as it was. At the move commit, the moved text is byte-identical to the old README from `## Debt ledger` down. No file outside the README linked to a log anchor, and code comments cite plain numbers like "D25", which still resolve.
 
 **What would break it:** the README growing back into a second log. If a new decision needs more than a line there, the detail belongs here.
 
-**Proof:** `cmp` of the moved text against `git show origin/main:README.md`, and a link check across the README, this file and `deploy/azure/README.md`. Docs have no unit tests, so the Block 8 independent review is what checks the README's claims against the code.
+**Proof:** `cmp` of the moved text at `6feca28` against `git show 357adc4:README.md`, and a link check across the README, this file and `deploy/azure/README.md`. Docs have no unit tests, so the Block 8 independent review is what checks the README's claims against the code.
 
 #### D55. Three Mermaid diagrams, each traced to the code
 
@@ -2020,7 +2021,9 @@ For 10,000 locations:
 
 **How solid the numbers are:**
 - "50–100 locations" is an estimate. It rests on 1–2 s per location, which nobody has measured. `precip.pass.duration` in Grafana would replace it.
-- "About 80 publishes" is derived from ntfy's documented defaults: a burst of 60, plus one every 5 s across a 100 s pass. Whether ntfy.sh's live limit matches the default isn't confirmed.
+- "About 80 publishes" is derived from ntfy's documented defaults: a burst of 60, plus one every 5 s across a 100 s pass. Whether ntfy.sh's live request limit matches the default isn't confirmed.
+- "250 messages a day" is ntfy's documented limit on ntfy.sh, per visitor. The job defaults to that server, so at 10,000 locations it's the first hard stop.
+- "About 4 locations on a night NWS hangs" is derived from the settings and untested (see the debt ledger).
 
 **What would break it:** a real measurement moving the estimate, or a trigger arriving and the item being built, at which point it leaves the README and earns its own entry.
 
@@ -2030,21 +2033,26 @@ For 10,000 locations:
 
 Compressing 53 entries into a design doc meant checking them against the code. Several claims didn't hold.
 
-**Decision (2026-11-03):** the old entries stay as written, with a pointer here, so the log still shows what I believed at the time.
+**Decision (2026-11-03):** the old entries stay as written, with pointers here from the main ones, so the log still shows what I believed at the time.
 
 **Rejected:** editing them in place, which reads cleanly but hides that they were ever wrong; and fixing only the README, which would leave it disagreeing with its source.
 
-**Duplicates have four causes, not "one gap".** D25 and the ledger called a lost ntfy response the one case. A duplicate is possible whenever a push may have gone out but the row never reached `Sent`:
+**Duplicates have several causes, not "one gap".** D25 and the ledger called a lost ntfy response the one case. A duplicate is possible whenever a push may have gone out but the row never reached `Sent`, including:
 - a lost ntfy response (D25);
 - a failed commit after a 2xx (D25);
 - the commit running out of its time bound (D44);
-- the hard deadline cutting a send short (D38).
+- the hard deadline cutting a send short (D38);
+- the process being killed mid-send (`Crash_mid_send_leaves_no_Sent_row_and_the_next_run_publishes`).
 
-**"The next run resends" really means Azure's one retry.** D25, D38, D44 and some code comments use that phrase. The next *scheduled* run is a different night. If the retry also fails, that night gets no alert, and the heartbeat fires. So a night gets one more attempt, unless I start a run by hand.
+D34 adds one more, where the row does reach `Sent`: a proxy returning 503 after ntfy published, which the in-process retry would repeat. D34 records that as an assumption.
+
+**"The next run resends" really means Azure's one retry.** D25, D38, D44 and some code comments use that phrase. The next *scheduled* run is a different night. If the retry also fails, that night may get no alert, and the heartbeat fires. So a night gets one more attempt, unless I start a run by hand.
 
 **"The row stays `Pending`" is only true if a row already existed.** The claim shares a transaction with the final commit. On a first attempt where ntfy returned 2xx but the commit is lost, the claim rolls back too and no row exists. After a failed publish, the `Pending` row comes from a separate best-effort write, and if that write also fails there's no row either. The next attempt behaves the same either way, so this changes the wording, not the design.
 
 **The heartbeat doesn't read Azure's state.** D20, D28 and D29 said or implied that it would read the Failed execution. In D39 the process pings its own exit code instead, and a run that never starts is caught by the missing ping after the grace period.
+
+**"No missing data may ever produce a dry verdict" was too broad.** D13 and D16 said it; it's true of missing hours, not of a null probability. D58 records that.
 
 **D27's "exit 2" was overtaken by D36.** A point that's still stale after one refresh now falls back to Open-Meteo, like any other NWS failure. Exit 2 means both providers failed.
 
@@ -2052,9 +2060,45 @@ Compressing 53 entries into a design doc meant checking them against the code. S
 - The ledger called the Open-Meteo capture "a dry week". The captures cover 4 days.
 - D19 said per-location schedules belong with Block 4. Block 4 didn't build them. There's still one cron, and it's now in the README's scale section (D56).
 - D53 still carried a task number from my working plan ("TF.2"). It now points at the evidence.
+- The "independent review" sections say "a separate reviewer". All of those reviewers were AI, in sessions that wrote none of the code. The README now says so.
 
-**A second kind of edit: the home zone.** The rule is that the repo doesn't say what zone a location is in. Some entries and comments did, by tying my machine or production to a named zone, or by quoting production times that reveal the offset. Those lines are reworded in D3, D14, D17, D19 and D25, and in `ci.yml`, `deploy.sh`, `deploy/azure/README.md` and `StrictTimestamps.cs`. New York stays where it's only a test zone. The old wording remains in git history. I chose not to rewrite that history: rewording limits new exposure and doesn't undo the old, and a force-push would break the commit hashes the log cites.
+**A second kind of edit: the home zone.** The rule is that the repo doesn't say what zone a location is in. Some entries and comments did, by tying my machine or production to a named zone, or by quoting production times that reveal the offset. Those lines are reworded in D3, D14, D17, D19 and D25, and in `ci.yml`, the `Dockerfile`, `deploy.sh`, `deploy/azure/README.md`, `StrictTimestamps.cs` and the comments in `NightWindowTests.cs`. New York stays where it's only a test zone. The old wording remains in git history. I chose not to rewrite that history: rewording limits new exposure and doesn't undo the old, and a force-push would break the commit hashes the log cites.
 
 **What would break it:** later entries repeating the old phrases. This entry is the reference.
 
 **Proof:** `Lost_response_is_resent_this_is_the_accepted_duplicate` and `A_stalled_database_after_the_send_is_abandoned_at_the_bookkeeping_bound` for the duplicate paths; `--replica-retry-limit 1` in `deploy.sh` for the single retry; the claim and the commit sharing one transaction in `PostgresAlertLedger.SendOnceAsync`. The Block 8 independent review re-checks each correction.
+
+### Block 8: independent review
+
+After D54–D57, a separate AI reviewer that wrote none of the text checked every README claim against the code, not just against this log. It confirmed:
+- **All nine tests the README names** exist and test what's claimed.
+- **Nothing was lost in the move.** This file differs from the old README only in the listed ways.
+- **The scale numbers** follow from the limits they cite, and each D57 correction is true of the code.
+- **The branch changed comments only** outside the docs.
+
+It found two high-severity defects, eight medium, fifteen low, and three notes. I fixed them, with these exceptions:
+- **The test that proves the cron** keeps its name. Its comments no longer name a season's local time, so New York reads as a sample zone.
+- **The log string in `PassHostedServices.cs`** still says "next run". Changing it is a runtime change, and D57 says what the phrase means.
+- **The default region (`eastus`)** stays. It's a weak hint, and anyone can pick it.
+- **Reliance on free tiers and D6's even-rate amounts** stay out of the README's trade-offs. They're in the log.
+
+The medium findings, all fixed:
+- The sequence diagram made per-location exits look like the end of the pass. It's now a loop, with the first-failure rule and the deadline check.
+- "Each entry has a rejected alternative and tests" wasn't true of each. The README now says most do.
+- "Four causes" undercounted duplicates (D57).
+- The trade-offs missed D50's cost: no smoke run.
+- "Independent review" didn't say the reviewers were AI. All of them were, and the README says so.
+- The rate-limit item missed ntfy.sh's limit of 250 messages a day.
+- More lines tied the zone to production (D57).
+
+#### D58. Review: a null probability counts as 0, so an all-null night reads as dry
+
+**High: the README's strongest claim was false.** It said missing data is never called dry. That holds for missing *hours*: a gap with no hits exits 4 (D13, D16). It doesn't hold for an hour that's present with a null probability. `ForecastEvaluator` reads `PrecipProbability ?? 0`, so a whole night of nulls produces no hits, no gap and exit 0. D9 recorded the rule, but D13 and D16 stated the principle too broadly, and I carried that into the README.
+
+**Decision (2026-11-03): keep the behaviour, and say so.** The README states the limit, lists it under "What I traded away", and the debt ledger carries it.
+
+**Rejected: treating a null probability as a gap, in this block.** It would make the original claim true. But it's a decision-engine change riding in on a documentation PR, and nobody has measured how often NWS sends nulls. If it does so routinely for some hours, the change would turn ordinary dry nights into failed runs and a red heartbeat. D9's rejection of "skip" was about a threshold of 0, which is a different option, so this one is still open.
+
+**What would break it:** NWS sending nulls across a wet night. The hours would count as 0, no alert would go out, and the run would report success. That's the same silence the heartbeat exists to end, and the heartbeat can't see it.
+
+**Tests:** `Null_probability_inside_an_existing_hour_is_still_covered` pins the behaviour, including a whole night of nulls.

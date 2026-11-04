@@ -40,7 +40,7 @@ internal sealed record LoopOptions(TimeSpan Interval)
 /// <b>What a cancelled send does.</b> The pass hands this token to the alert ledger unchanged, so
 /// the ledger sees the backstop as <i>our</i> cancellation (D25's <c>IsOurCancellation</c>): no
 /// bookkeeping, and the transaction rolls back. An interrupted send therefore leaves the row
-/// <c>Pending</c> (or absent) and the next run resends, D25's accepted at-least-once duplicate.
+/// <c>Pending</c> (or absent) and the next attempt resends, D25's accepted at-least-once duplicate.
 /// After ntfy has accepted, the ledger ignores cancellation and commits <c>Sent</c>.
 /// </para>
 /// </summary>

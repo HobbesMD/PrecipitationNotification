@@ -474,7 +474,7 @@ internal sealed class NightlyPass(
         {
             // The ledger's own statements failed (claim, lock or commit), not ntfy. If the commit
             // failed after a 2xx the push did go out; either way the row isn't Sent, so the next
-            // run sends (D25's at-least-once case). Exit 6 says where to look, not "ntfy down".
+            // attempt sends (D25's at-least-once case). Exit 6 says where to look, not "ntfy down".
             Fail(notifySpan, ex);
             log.LogError(
                 "Location {LocationId} ({LocationName}): alert ledger database error during send: {Error}",
