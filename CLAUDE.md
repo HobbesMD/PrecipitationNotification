@@ -28,7 +28,7 @@ interviews, so it gets the gate.)
 1. **Decide.** Lay out the real options, what each trades away, and a
    recommendation. I make the call. Don't pick for me silently.
 2. **Build.** Implement it the way we agreed.
-3. **Record.** In the same commit, add a README decision-log entry written as
+3. **Record.** In the same commit, add a decision-log entry (`docs/decisions.md`) written as
    interview prep: the decision, the rejected alternative, why, what would break
    it, and which tests prove it. Plain English, self-contained — I study these
    instead of being quizzed. (Quizzes dropped 2026-10-29; don't reintroduce them.)
@@ -88,7 +88,7 @@ side projects die.
 | 7 | CI/CD | Actions: build → test → container → push → deploy. |
 | 8 | README as design doc | What I built, what I traded away, why. Diagrams. |
 
-**Current block: 8.** (Block 1 done 2026-10-29 — notification confirmed on phone. Block 2 done 2026-10-29 — PR #1. Block 3 done 2026-10-29 — PR #2. Block 4 done 2026-10-31 — PR #3, merged after two clean scheduled runs, including the DST fall-back night. Block 5 done 2026-11-01 — PR #4. Block 6 done 2026-11-02 — heartbeat drill reached phone and email; first scheduled run green. Block 7 done 2026-11-03 — PR #6; merge deployed by CI, guard drill stopped at exit 3, first scheduled run on the CI-deployed image green.)
+**All blocks done.** (Block 1 done 2026-10-29 — notification confirmed on phone. Block 2 done 2026-10-29 — PR #1. Block 3 done 2026-10-29 — PR #2. Block 4 done 2026-10-31 — PR #3, merged after two clean scheduled runs, including the DST fall-back night. Block 5 done 2026-11-01 — PR #4. Block 6 done 2026-11-02 — heartbeat drill reached phone and email; first scheduled run green. Block 7 done 2026-11-03 — PR #6; merge deployed by CI, guard drill stopped at exit 3, first scheduled run on the CI-deployed image green. Block 8 done 2026-11-03 — README is the design doc, D54–D58.)
 
 Block 1 leaves debt *on purpose* — hardcoded coordinates, naive time handling,
 topic in source, no tests, no retry. Block 2 fixes it. Don't fix it early; the
@@ -125,5 +125,5 @@ Per-location settings are DB rows (since Block 4), managed through the API:
 - One branch per block (`block-N-<slug>`) → PR to main → **merge commit, never
   squash**. The commit history is part of the story.
 - Public repo from commit one. Nothing secret in source, ever.
-- Every non-obvious tradeoff gets a line in the README when it's made, not at
+- Every non-obvious tradeoff gets a line in `docs/decisions.md` when it's made, not at
   block 8 when I've forgotten why.

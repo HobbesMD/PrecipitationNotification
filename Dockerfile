@@ -1,6 +1,6 @@
 # Build: SDK image. Runtime: chiseled *-extra*, non-root (user "app").
 #
-# Why -extra: the worker resolves an IANA zone id from NWS (America/New_York)
+# Why -extra: the worker resolves an IANA zone id from NWS
 # with TimeZoneInfo.FindSystemTimeZoneById. Plain chiseled images ship no
 # tzdata, so that call would throw on every run. -extra adds tzdata + ICU.
 # `docker run --rm <image> --self-check` proves the zone rules are present.

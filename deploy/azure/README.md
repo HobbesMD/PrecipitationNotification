@@ -326,8 +326,8 @@ From the repo root:
 
 It creates the resource group, a Consumption-plan environment (with a Log
 Analytics workspace created automatically), and the job on the cron
-`0 23 * * *`. Container Apps cron is UTC only: 23:00 UTC is 7 PM EDT / 6 PM EST,
-always before the 8 PM local window opens.
+`0 23 * * *`. Container Apps cron is UTC only, so the local time moves with DST, but it stays
+before the 8 PM local window opens all year.
 
 To ship a new version, re-run it with the new `IMAGE`. If the release has a
 migration, [Migrate](#migrate) first.

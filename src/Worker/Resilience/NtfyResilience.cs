@@ -14,7 +14,7 @@ namespace Worker.Resilience;
 /// <para>
 /// <b>The rule.</b> Retry in-process only when the request provably never reached ntfy, or
 /// ntfy provably didn't process it. Every other failure goes straight back to the ledger,
-/// which records it and leaves the row <c>Pending</c> for the next run. In-process retries
+/// which records it and leaves the row <c>Pending</c> for the next attempt. In-process retries
 /// therefore add no duplicate window beyond D25's accepted lost-response case: any attempt
 /// this pipeline repeats is one that cannot have buzzed the phone.
 /// </para>
@@ -136,7 +136,7 @@ internal static class NtfyResilience
     /// <item><see cref="TimeoutRejectedException"/> (the attempt or total timeout fired) and any
     /// <see cref="OperationCanceledException"/>: the request may have been fully delivered and
     /// processed; only the response was missed. That is D25's lost-response case, left to the
-    /// ledger and the next run, never repeated here.</item>
+    /// ledger and the next attempt, never repeated here.</item>
     /// <item><c>ResponseEnded</c>, <c>InvalidResponse</c>, <c>HttpProtocolError</c>,
     /// <c>Unknown</c> and every other code: raised after the request was (possibly) sent.</item>
     /// <item>Any exception that is not an <see cref="HttpRequestException"/>: we cannot say

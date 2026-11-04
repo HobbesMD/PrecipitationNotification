@@ -1,8 +1,8 @@
 namespace Worker.Pass;
 
 /// <summary>
-/// Process exit codes. Azure retries any non-zero exit once (D20) and keeps the failed
-/// execution as state the Block 6 heartbeat can read, so every failure class has its own code.
+/// Process exit codes. Azure retries any non-zero exit once (D20), and the process reports its
+/// own code to the heartbeat (D39), so every failure class has its own code.
 /// </summary>
 internal static class ExitCodes
 {
