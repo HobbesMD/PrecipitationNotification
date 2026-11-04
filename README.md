@@ -1816,7 +1816,7 @@ Until Block 7, a release was three commands on my laptop: `docker build`, `docke
 #### D48. CI signs in to Azure with OIDC: no stored credential, one environment, one resource
 
 **Decision:** the `deploy` job gets a short-lived Azure token through **OpenID Connect federation**.
-- An Entra app registration (`gh-precip-deploy`) has **no client secret and no certificate**. Its one federated credential trusts tokens from GitHub's issuer whose subject is exactly `repo:HobbesMD/PrecipitationNotification:environment:production`.
+- An Entra app registration (`gh-precip-deploy`) has **no client secret and no certificate**. Its one federated credential trusts tokens from GitHub's issuer whose subject is exactly `repo:HobbesMD@38821918/PrecipitationNotification@1359573647:environment:production`. That is GitHub's immutable subject format: it carries the owner and repo ids as well as the names, so a repo deleted and re-created under the same name (by anyone) can't present it. `setup-oidc.sh` reads the prefix from GitHub (`actions/oidc/customization/sub`) rather than building it from the name.
 - The GitHub environment `production` accepts deployments from `main` only. A pull request, a fork or another branch can't produce that subject, so it gets no token.
 - The identity has one custom role, **Precip Job Deployer** (`Microsoft.App/jobs/read` and `jobs/write`), assigned on **the job resource only**, not the resource group or the subscription. It is not `Contributor`, which can also list the job's secret values (D53).
 - `id-token: write` is granted only to the `deploy` job.
@@ -1831,7 +1831,15 @@ Until Block 7, a release was three commands on my laptop: `docker build`, `docke
 - Granting the role at resource-group scope, or swapping in `Contributor`, "to make it work".
 - If `job update` also needs `Microsoft.App/managedEnvironments/join/action`, `setup-oidc.sh` with `JOIN_ENV=1` adds a custom role with only that action, on the environment only.
 
-**Proof:** in production (below), not unit tests.
+**Proof:** in production, not unit tests.
+
+**In production (2026-11-03):**
+- **The first deploy failed at sign-in, before touching Azure:** `AADSTS700213: No matching federated identity record found for presented assertion subject 'repo:HobbesMD@38821918/PrecipitationNotification@1359573647:environment:production'`. I had written the credential with the name-only subject; this repo uses the immutable format.
+- **The fix:**
+  1. `setup-oidc.sh` now reads the subject prefix from GitHub instead of building it from the name.
+  2. I deleted the old credential by hand. The script refuses to overwrite a credential that trusts something else, as designed.
+  3. "Re-run failed jobs" on the same run then deployed.
+- **The custom role was enough.** `job update` ran under Precip Job Deployer (`jobs/read` and `jobs/write` only). It needed neither `JOIN_ENV=1` nor `listSecrets` (D53).
 
 #### D49. CI deploys the image and nothing else; the app's secrets never enter GitHub
 
@@ -1849,6 +1857,12 @@ Secrets, cron, sizing, registry and the other environment variables stay exactly
 
 **Rejected:**
 - **Running the full `deploy.sh` in CI.** The configuration would be reproducible from CI, but GitHub would then hold every production secret (the database string, the ntfy topic, the heartbeat URL, the Grafana token), and the identity would need rights to set secrets. A config change is rare and deliberate, so it can stay manual.
+
+**In production (2026-11-03):** the first pipeline deploy (run `41555226637`, merge `007b51df477e`) printed `Deployed …:007b51df477e (was …:13aaf54838b9)`. Read back by hand afterwards, the job still had:
+- `--once`, cron `0 23 * * *`, timeout 300 and retry 1;
+- the same four secrets, and all nine env vars with their four secretrefs.
+
+Only the image and `service.version=007b51df477e` had changed.
 
 **What would break it:**
 - A configuration change made only in `deploy.sh` and never run. CI won't apply it.
@@ -1875,6 +1889,8 @@ Proven by breaking it: switching to `--replace-env-vars` fails 4 checks; removin
 **Rejected:**
 - **A required-reviewer gate on `production`.** Safer for a schema change, but that case has its own guard (D51). For everything else, the click is a step nobody enforces, and a forgotten approval means the night runs on old code with no alarm.
 - **Deploying only by `workflow_dispatch`.** Fully deliberate, but it isn't continuous deployment, and "merged" would stop meaning "live".
+
+**In production (2026-11-03):** the smoke test worked as designed. The first scheduled run on a CI-deployed image (`job-precip-nightly-29895780`, 23:00 UTC) succeeded in 33 s on `007b51df477e`, with `service.version=007b51df477e` on the execution and no warning or error in its 21 log lines. The healthchecks check stayed green. The deploy ran entirely on GitHub's runners; the one manual step was the one-time sign-in fix recorded in D48.
 
 **What would break it:** a merge late in the evening deploys minutes before 23:00 UTC. A run that's already executing keeps its old image, and the next run takes the new one. The worst case is a broken image merged at 22:59. If it runs and fails, the heartbeat alerts at once. If it never starts (it won't pull, or crashes before the host starts), the alert comes when the grace period ends, by 00:00 UTC. Either way, rollback is one dispatch.
 
@@ -1918,6 +1934,10 @@ Proven by breaking it: switching to `--replace-env-vars` fails 4 checks; removin
 - run from a subdirectory, B→C still blocks (3), with an inherited `MIGRATIONS_PATH` set throughout to prove it can't move the watched path.
 
 Proven by breaking it: with the guard mutated to always exit 0, every case fails; with the move to the top of the checkout removed, the subdirectory case fails.
+
+**In production (2026-11-03):**
+- **The first real deploy passed the guard:** "No migration changes between 13aaf54838b9 (deployed) and 007b51df477e (target)."
+- **The drill:** a rollback dispatch (run `41555787642`) to the Block 4 image `b4c3120f642d`, which predates `AddAlertProvider`, stopped with **exit 3** before any update call. It listed the three migration files and printed the exact re-run command (`sha=b4c3120f642d and migrations_applied=true`). The job still ran `007b51df477e` afterwards.
 
 #### D52. Supply chain: pinned actions, the image pushed only from main, and no tag is ever overwritten
 
