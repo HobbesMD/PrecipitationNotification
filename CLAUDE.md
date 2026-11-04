@@ -88,7 +88,7 @@ side projects die.
 | 7 | CI/CD | Actions: build → test → container → push → deploy. |
 | 8 | README as design doc | What I built, what I traded away, why. Diagrams. |
 
-**Current block: 7.** (Block 1 done 2026-10-29 — notification confirmed on phone. Block 2 done 2026-10-29 — PR #1. Block 3 done 2026-10-29 — PR #2. Block 4 done 2026-10-31 — PR #3, merged after two clean scheduled runs, including the DST fall-back night. Block 5 done 2026-11-01 — PR #4. Block 6 done 2026-11-02 — heartbeat drill reached phone and email; first scheduled run green.)
+**Current block: 8.** (Block 1 done 2026-10-29 — notification confirmed on phone. Block 2 done 2026-10-29 — PR #1. Block 3 done 2026-10-29 — PR #2. Block 4 done 2026-10-31 — PR #3, merged after two clean scheduled runs, including the DST fall-back night. Block 5 done 2026-11-01 — PR #4. Block 6 done 2026-11-02 — heartbeat drill reached phone and email; first scheduled run green. Block 7 done 2026-11-03 — PR #6; merge deployed by CI, guard drill stopped at exit 3, first scheduled run on the CI-deployed image green.)
 
 Block 1 leaves debt *on purpose* — hardcoded coordinates, naive time handling,
 topic in source, no tests, no retry. Block 2 fixes it. Don't fix it early; the

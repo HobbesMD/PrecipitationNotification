@@ -8,6 +8,7 @@
 # Optional env: AZ_RG (rg-precip)  AZ_ENV (cae-precip)  AZ_JOB (job-precip-nightly)
 #               GH_REPO (HobbesMD/PrecipitationNotification)  APP_NAME (gh-precip-deploy)
 #               JOIN_ENV=1  also create and assign the environment-join custom role
+#               GH_SUB_PREFIX  the OIDC subject prefix (default: read with `gh api`)
 #
 # Usage: deploy/azure/setup-oidc.sh      (see deploy/azure/README.md, Block 7)
 #
@@ -31,7 +32,22 @@ ISSUER="https://token.actions.githubusercontent.com"
 CRED_NAME="github-production"
 # The subject is the lock. Only a workflow job that runs against the GitHub
 # environment `production` (itself restricted to the main branch) can present it.
-SUBJECT="repo:${GH_REPO}:environment:production"
+#
+# Its prefix comes from GitHub, not from the repo name: this repo uses GitHub's
+# immutable subject format, `repo:<owner>@<owner id>/<repo>@<repo id>`. The ids
+# mean a repo deleted and re-created under the same name (by anyone) can't
+# present our subject. Building it from the name instead was the first
+# deploy's failure: AADSTS700213, no matching federated identity record.
+# Set GH_SUB_PREFIX to skip the lookup (no gh CLI); copy it exactly from
+# `gh api repos/<owner>/<repo>/actions/oidc/customization/sub`.
+if [[ -z "${GH_SUB_PREFIX:-}" ]]; then
+  if ! GH_SUB_PREFIX=$(gh api "repos/$GH_REPO/actions/oidc/customization/sub" --jq .sub_claim_prefix 2>/dev/null | tr -d '\r') \
+     || [[ "$GH_SUB_PREFIX" != repo:* ]]; then
+    echo "Could not read the OIDC subject prefix for $GH_REPO (needs gh, logged in). Set GH_SUB_PREFIX; stopping." >&2
+    exit 1
+  fi
+fi
+SUBJECT="${GH_SUB_PREFIX}:environment:production"
 JOINER_ROLE="Container Apps Environment Joiner"
 DEPLOYER_ROLE="Precip Job Deployer"
 

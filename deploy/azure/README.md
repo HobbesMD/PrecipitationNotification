@@ -221,7 +221,8 @@ After you change configuration with it, the next CI deploy just swaps the image.
 
    It creates the Entra app `gh-precip-deploy`, its service principal, one
    federated credential (`github-production`, trusting only
-   `repo:HobbesMD/PrecipitationNotification:environment:production`), and a custom
+   `repo:HobbesMD@38821918/PrecipitationNotification@1359573647:environment:production`,
+   the immutable subject format, read from GitHub), and a custom
    role, **Precip Job Deployer**, that can only read and write the job's definition
    (`Microsoft.App/jobs/read`, `Microsoft.App/jobs/write`), assigned on the job
    alone. It is deliberately not `Contributor`: that includes
