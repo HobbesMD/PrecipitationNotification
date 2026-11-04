@@ -70,8 +70,8 @@ elif [[ -n "${GHCR_USER:-}" || -n "${GHCR_PAT:-}" ]]; then
   exit 1
 fi
 
-# Container Apps cron is UTC only. 23:00 UTC = 7 PM EDT / 6 PM EST, so the run
-# is always before the 8 PM local window opens, in both halves of the DST year.
+# Container Apps cron is UTC only, so the local run time moves with DST. It stays
+# before the 8 PM local window opens in both halves of the DST year.
 CRON="0 23 * * *"
 
 # service.version for telemetry: the image's git sha tag, or the digest's hex for a

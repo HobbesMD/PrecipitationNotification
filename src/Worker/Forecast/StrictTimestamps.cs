@@ -6,7 +6,7 @@ namespace Worker.Forecast;
 /// <summary>
 /// ISO-8601 timestamp parsing that refuses anything without an explicit UTC offset.
 /// <see cref="DateTimeOffset.Parse(string)"/> silently reads an offset-less string in the
-/// <em>host's</em> zone, which shifts the instant by 4 h between a New York dev box and a UTC
+/// <em>host's</em> zone, which shifts the instant by hours between a dev box and a UTC
 /// container. Failing loudly beats a forecast that is quietly wrong in one environment.
 /// </summary>
 internal static partial class StrictTimestamps

@@ -23,10 +23,10 @@ namespace Worker.Alerts;
 /// </para>
 ///
 /// <para>
-/// <b>The one gap, accepted on purpose (at-least-once).</b> If ntfy accepted the
-/// push but the response was lost, the publish throws, the transaction rolls back,
-/// and the row stays <c>Pending</c>. The next attempt sends again and the phone gets
-/// a duplicate. No database can close this gap, because the side effect lives in
+/// <b>The gap, accepted on purpose (at-least-once).</b> If ntfy accepted the push but
+/// the row never reached <c>Sent</c> (a lost response, a failed or timed-out commit, or
+/// the hard deadline; D57), the transaction rolls back and the row is <c>Pending</c> or
+/// absent. The next attempt sends again and the phone gets a duplicate. No database can close this gap, because the side effect lives in
 /// ntfy, outside the transaction. The owner chose a possible duplicate over a
 /// possible missed alert.
 /// </para>
@@ -162,8 +162,8 @@ internal sealed class PostgresAlertLedger(
             """,
             bounded);
 
-        // If this commit fails or runs out of time, the push went out but the row stays Pending
-        // and the next run re-sends: the same at-least-once case as a lost ntfy response, and
+        // If this commit fails or runs out of time, the push went out but the row is Pending or
+        // absent (the claim rolls back too), and the next attempt re-sends: the same at-least-once case as a lost ntfy response, and
         // accepted with it.
         await tx.CommitAsync(bounded);
     }

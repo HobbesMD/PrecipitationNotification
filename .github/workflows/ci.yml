@@ -36,7 +36,7 @@ jobs:
       fail-fast: false
       matrix:
         # The decision engine must not depend on the host's time zone.
-        # Production runs in a UTC container, the dev box is New York, and
+        # Production runs in a UTC container, New York is the fixtures' zone, and
         # Sydney is a positive-offset southern-hemisphere zone (opposite DST).
         tz: [UTC, America/New_York, Australia/Sydney]
     env:
